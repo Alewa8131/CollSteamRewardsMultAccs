@@ -96,12 +96,12 @@ async def _attempt_to_close_any_modal(page, steamid):
     """Попытка закрыть любое открытое модальное окно или оверлей."""
     print(f"[{steamid}] Playwright: Попытка закрыть любое открытое модальное окно.")
     try:
-        # Prioritize "Later" / "Позже" button first, then generic close buttons
+        # Приоритет кнопки "Позже" / "Later", затем общие кнопки закрытия
         close_button_selectors = [
             'button._3Ju8vy_foEPg9ILmy2-htb._1hcJa9ylImmFKuHsfilos.Focusable:has-text("Позже")',
             'button._3Ju8vy_foEPg9ILmy2-htb._1hcJa9ylImmFKuHsfilos.Focusable:has-text("Later")',
-            'button[aria-label="Close"]',  # Generic close button for dialogs
-            'div[class*="ModalPosition_TopBar"] button',  # Close button in top bar
+            'button[aria-label="Close"]',  # Общая кнопка закрытия для диалогов
+            'div[class*="ModalPosition_TopBar"] button',  # Кнопка закрытия в верхней панели
             'button:has-text("Отмена")',
             'button:has-text("Cancel")'
         ]
@@ -111,13 +111,27 @@ async def _attempt_to_close_any_modal(page, steamid):
             if close_button and await close_button.is_visible():
                 print(f"[{steamid}] Playwright: Найдена кнопка закрытия/отмены по селектору '{selector}'. Кликаю.")
                 await close_button.click()
-                await asyncio.sleep(0.2)  # Reduced delay
+                await asyncio.sleep(0.2)  # Уменьшенная задержка
                 return True  # Успешно закрыли
         print(f"[{steamid}] Playwright: Кнопка закрытия/отмены не найдена.")
         return False
     except Exception as e:
         print(f"[{steamid}] Playwright: Ошибка при попытке закрыть модальное окно: {e}")
         return False
+
+
+# Вспомогательная функция для парсинга строки multipart/form-data для конкретного поля
+def _parse_multipart_field(multipart_string: str, field_name: str) -> str | None:
+    """
+    Парсит строку multipart/form-data для извлечения значения конкретного поля.
+    """
+    # Это регулярное выражение ищет имя поля и захватывает все до следующего разделителя или конца строки.
+    # Оно предполагает структуру: Content-Disposition: form-data; name="field_name"\r\n\r\nfield_value\r\n
+    pattern = rf'name="{re.escape(field_name)}"\r\n\r\n(.*?)\r\n(?:--|$)'
+    match = re.search(pattern, multipart_string, re.DOTALL)
+    if match:
+        return match.group(1).strip()
+    return None
 
 
 async def collect_points_items(session: aiohttp.ClientSession, steamid: str, cookies: dict, shop_url: str,
@@ -193,23 +207,18 @@ async def collect_points_items(session: aiohttp.ClientSession, steamid: str, coo
 
                 # Перехватываем protobuf для RedeemPoints
                 if "ILoyaltyRewardsService/RedeemPoints/v1" in url and method == "POST":
-                    post_data = request.post_data
-                    if post_data:
-                        # ИСПРАВЛЕНИЕ: Проверяем тип post_data и парсим JSON, если это строка
-                        if isinstance(post_data, str):
-                            try:
-                                post_data = json.loads(post_data)
-                            except json.JSONDecodeError:
-                                print(
-                                    f"[{steamid}] Playwright: Ошибка парсинга JSON для post_data: {post_data[:100]}...")
-                                await route.continue_()
-                                return
+                    post_data_str = request.post_data  # Это сырое строковое содержимое
 
-                        if "input_protobuf_encoded" in post_data:
-                            redeem_protobuf = post_data["input_protobuf_encoded"]
-                            if redeem_protobuf not in collected_protobufs:
-                                collected_protobufs.append(redeem_protobuf)
-                                print(f"[{steamid}] ✅ Playwright: Перехвачен Redeem Protobuf: {redeem_protobuf}")
+                    if post_data_str:
+                        # Используем вспомогательную функцию для парсинга multipart/form-data
+                        redeem_protobuf = _parse_multipart_field(post_data_str, "input_protobuf_encoded")
+
+                        if redeem_protobuf and redeem_protobuf not in collected_protobufs:
+                            collected_protobufs.append(redeem_protobuf)
+                            print(f"[{steamid}] ✅ Playwright: Перехвачен Redeem Protobuf: {redeem_protobuf}")
+                        elif not redeem_protobuf:
+                            print(
+                                f"[{steamid}] Playwright: Не удалось извлечь input_protobuf_encoded из post_data (multipart). Начало сырых данных: {post_data_str[:100]}...")
 
                 await route.continue_()
 
@@ -221,7 +230,7 @@ async def collect_points_items(session: aiohttp.ClientSession, steamid: str, coo
 
                 # Ждем, пока все элементы загрузятся, используя более точный селектор
                 await page.wait_for_selector('div.skI5tVFxF4zkY8z56LALc', timeout=30000)  # Увеличенный таймаут
-                await asyncio.sleep(2)  # Reduced delay for loading scripts and rendering
+                await asyncio.sleep(2)  # Уменьшенная задержка для загрузки скриптов и рендеринга
 
                 # Находим все элементы предметов
                 item_elements = await page.query_selector_all('div.skI5tVFxF4zkY8z56LALc')
@@ -236,10 +245,10 @@ async def collect_points_items(session: aiohttp.ClientSession, steamid: str, coo
                         if price_element:
                             price_text = (await price_element.text_content() or "").strip()
                             print(
-                                f"[{steamid}] Playwright: Debug: price_element найден для предмета #{i + 1}. Текст: '{price_text}'")
+                                f"[{steamid}] Playwright: Отладка: price_element найден для предмета #{i + 1}. Текст: '{price_text}'")
                         else:
                             price_text = ""
-                            print(f"[{steamid}] Playwright: Debug: price_element НЕ найден для предмета #{i + 1}.")
+                            print(f"[{steamid}] Playwright: Отладка: price_element НЕ найден для предмета #{i + 1}.")
 
                         is_free = False
                         if "Free" in price_text or "Бесплатно" in price_text:
@@ -249,55 +258,51 @@ async def collect_points_items(session: aiohttp.ClientSession, steamid: str, coo
                             print(
                                 f"[{steamid}] Playwright: Найден бесплатный предмет #{i + 1}. Попытка кликнуть по элементу.")
 
-                            # 1. Click on the item element itself to open the modal
+                            # 1. Кликаем по элементу предмета, чтобы открыть модальное окно
                             await item_el.click()
                             print(f"[{steamid}] Playwright: Кликнул по элементу предмета.")
 
-                            # 2. Wait for the main modal container to appear
-                            # Using the specific class for the modal container, now correctly 'dialog'
+                            # 2. Ждем появления основного контейнера модального окна
                             modal_container_selector = 'dialog._32QRvPPBL733SpNR9x0Gp3'
                             try:
                                 modal_container = await page.wait_for_selector(modal_container_selector, timeout=10000)
                                 print(
                                     f"[{steamid}] Playwright: Главный контейнер модального окна появился (селектор: '{modal_container_selector}').")
 
-                                # Now, wait for the active content within that container
+                                # Теперь ждем активного содержимого внутри этого контейнера
                                 modal_overlay_content_selector = 'div.ModalOverlayContent.active'
                                 purchase_modal_content = await modal_container.wait_for_selector(
                                     modal_overlay_content_selector, timeout=5000)
                                 print(
                                     f"[{steamid}] Playwright: Активное содержимое модального окна появилось (селектор: '{modal_overlay_content_selector}').")
-                                # Debug: print modal content for further inspection if needed
-                                # print(f"[{steamid}] Playwright: Debug: Modal content outerHTML: {await purchase_modal_content.outer_html()}")
 
-                                # 3. Attempt to find and click the "Free" / "Бесплатно" button for purchase
-                                # ИСПРАВЛЕНИЕ: Селектор для кнопки "Бесплатно" внутри модального окна
-                                free_purchase_button_selector = 'div[role="button"]._19X6AbdPOUHqSxNz3mm18i:has(div._2pwsWXANIuk8w8cZ8wvNz:has-text("Бесплатно")), div[role="button"]._19X6AbdPOUHqSxNz3mm18i:has(div._2pwsWXANIuk8w8cZ8wvNz:has-text("Free"))'
+                                # 3. Попытка найти и кликнуть по кнопке "Бесплатно" для покупки
                                 free_purchase_button = await purchase_modal_content.query_selector(
-                                    free_purchase_button_selector)
+                                    'div[role="button"]._19X6AbdPOUHqSxNz3mm18i:has(div._2pwsWXANIuk8w8cZ8wvNz:has-text("Бесплатно")), div[role="button"]._19X6AbdPOUHqSxNz3mm18i:has(div._2pwsWXANIuk8w8cZ8wvNz:has-text("Free"))'
+                                )
 
-                                # 4. Attempt to find and click the "Использовать сейчас" / "Equip now" button for already owned items
-                                equip_now_button_selector = 'button.SRxqV4jytIuP55fxgfpD1._1hcJa9ylImmFKuHsfilos.Focusable:has-text("Использовать сейчас"), button.SRxqV4jytIuP55fxgfpD1._1hcJa9ylImmFKuHsfilos.Focusable:has-text("Equip now")'
+                                # 4. Попытка найти и кликнуть по кнопке "Использовать сейчас" / "Equip now" для уже имеющихся предметов
                                 equip_now_button = await purchase_modal_content.query_selector(
-                                    equip_now_button_selector)
+                                    'button.SRxqV4jytIuP55fxgfpD1._1hcJa9ylImmFKuHsfilos.Focusable:has-text("Использовать сейчас"), button.SRxqV4jytIuP55fxgfpD1._1hcJa9ylImmFKuHsfilos.Focusable:has-text("Equip now")'
+                                )
 
                                 if free_purchase_button and await free_purchase_button.is_visible():
                                     print(
                                         f"[{steamid}] Playwright: Найдена кнопка 'Бесплатно' в модальном окне. Кликаю...")
                                     await free_purchase_button.click()
-                                    await asyncio.sleep(0.5)  # Short delay after purchase click
+                                    await asyncio.sleep(0.5)  # Короткая задержка после клика по покупке
 
-                                    # Now wait for the "Later" button (post-purchase modal)
+                                    # Теперь ждем кнопку "Позже" (модальное окно после покупки)
                                     try:
                                         later_button_selector = 'button._3Ju8vy_foEPg9ILmy2-htb._1hcJa9ylImmFKuHsfilos.Focusable:has-text("Позже"), button._3Ju8vy_foEPg9ILmy2-htb._1hcJa9ylImmFKuHsfilos.Focusable:has-text("Later")'
                                         later_button = await page.wait_for_selector(later_button_selector,
-                                                                                    timeout=5000)  # Shorter timeout for the "Later" button as it should appear quickly
+                                                                                    timeout=5000)  # Меньший таймаут для кнопки "Позже", так как она должна появиться быстро
                                         if later_button and await later_button.is_visible():
                                             print(f"[{steamid}] Playwright: Найдена кнопка 'Позже'. Кликаю.")
                                             await later_button.click()
                                             print(
                                                 f"[{steamid}] Playwright: ✅ Предмет #{i + 1} успешно куплен и модальное окно закрыто.")
-                                            await asyncio.sleep(0.2)  # Final short delay
+                                            await asyncio.sleep(0.2)  # Окончательная короткая задержка
                                         else:
                                             print(
                                                 f"[{steamid}] Playwright: Кнопка 'Позже' не найдена или невидима после покупки. Попытка закрыть модальное окно.")
@@ -312,7 +317,7 @@ async def collect_points_items(session: aiohttp.ClientSession, steamid: str, coo
                                         await _attempt_to_close_any_modal(page, steamid)
 
                                 elif equip_now_button and await equip_now_button.is_visible():
-                                    # Item is already owned, just click "Позже" or close the modal
+                                    # Предмет уже куплен, просто кликаем "Позже" или закрываем модальное окно
                                     print(
                                         f"[{steamid}] Playwright: Предмет #{i + 1} уже куплен (обнаружена кнопка 'Использовать сейчас'). Попытка закрыть модальное окно.")
                                     await _attempt_to_close_any_modal(page, steamid)
@@ -321,30 +326,38 @@ async def collect_points_items(session: aiohttp.ClientSession, steamid: str, coo
 
                                 else:
                                     print(
-                                        f"[{steamid}] Playwright: В модальном окне не найдена кнопка 'Бесплатно' или 'Использовать сейчас'. Возможно, произошла ошибка или неожиданное состояние. Попытка закрыть модальное окно.")
+                                        f"[{steamid}] Playwright: В модальном окне не найдена кнопка 'Бесплатно' или 'Использовать сейчас'. Возможно, произошла ошибка или неожиданное состояние.")
+                                    try:
+                                        # Используем уже найденный purchase_modal_content ElementHandle для получения его innerHTML
+                                        print(
+                                            f"[{steamid}] Playwright: Отладка: Inner HTML содержимого модального окна (кнопки не найдены):")
+                                        print(await purchase_modal_content.inner_html())
+                                    except Exception as debug_e:
+                                        print(
+                                            f"[{steamid}] Playwright: Отладка: Ошибка при получении innerHTML модального окна: {debug_e}")
                                     await _attempt_to_close_any_modal(page, steamid)
 
                             except PlaywrightTimeoutError:
                                 print(
                                     f"[{steamid}] Playwright: Таймаут ожидания активного содержимого модального окна. Пропускаю этот предмет.")
-                                await _attempt_to_close_any_modal(page, steamid)  # Always attempt to close
+                                await _attempt_to_close_any_modal(page, steamid)  # Всегда пытаемся закрыть
                             except Exception as modal_e:
                                 print(
                                     f"[{steamid}] Playwright: Ошибка при работе с модальным окном (после клика по предмету): {modal_e}. Пропускаю этот предмет.")
-                                await _attempt_to_close_any_modal(page, steamid)  # Always attempt to close
+                                await _attempt_to_close_any_modal(page, steamid)  # Всегда пытаемся закрыть
 
-                            await asyncio.sleep(0.5)  # Reduced delay before next item
+                            await asyncio.sleep(0.5)  # Уменьшенная задержка перед следующим предметом
                         else:
                             print(
                                 f"[{steamid}] Playwright: Предмет #{i + 1} не бесплатен (цена: '{price_text}'). Пропускаю.")
                     except PlaywrightTimeoutError:
                         print(f"[{steamid}] Playwright: Таймаут при обработке предмета #{i + 1}. Пропускаю.")
                         await _attempt_to_close_any_modal(page,
-                                                          steamid)  # Ensure modal is closed if timeout occurs during item processing
+                                                          steamid)  # Убедитесь, что модальное окно закрыто, если произошел таймаут во время обработки предмета
                     except Exception as e:
                         print(f"[{steamid}] Playwright: Ошибка при обработке предмета #{i + 1}: {e}")
                         await _attempt_to_close_any_modal(page,
-                                                          steamid)  # Ensure modal is closed if error occurs during item processing
+                                                          steamid)  # Убедитесь, что модальное окно закрыто, если произошла ошибка во время обработки предмета
 
             except PlaywrightTimeoutError as e:
                 print(f"[{steamid}] Playwright: Таймаут при загрузке страницы: {e}. Пропускаю.")
@@ -380,7 +393,7 @@ async def collect_points_items(session: aiohttp.ClientSession, steamid: str, coo
                     response_bytes = await redeem_resp.read()
 
                     if redeem_resp.status == 200 and not response_bytes:
-                        print(f"[{steamid}] 🎁 Успешно куплен предмет (protobuf ID: {item_protobuf_id}) за очки!")
+                        print(f"[{steamid}] � Успешно куплен предмет (protobuf ID: {item_protobuf_id}) за очки!")
                     elif redeem_resp.status == 200 and response_bytes:
                         print(
                             f"[{steamid}] ⚠️ Покупка завершена, но сервер вернул бинарный ответ: {response_bytes.hex()}")
@@ -400,7 +413,7 @@ async def run_for_account(mafile_path: str, urls: list[str], is_first_account: b
     session = client.session
     steamid = mafile_data["Session"]["SteamID"]
 
-    # ИСПРАВЛЕНИЕ: Получение access_token после client.login() из куки
+    # Получаем access_token после client.login() из куки
     access_token = None
     cookies_from_client = client.session.cookie_jar.filter_cookies(URL("https://store.steampowered.com"))
 
@@ -420,7 +433,6 @@ async def run_for_account(mafile_path: str, urls: list[str], is_first_account: b
     try:
         if is_first_account:
             # Первый аккаунт собирает protobufs через Playwright
-            # ИСПРАВЛЕНИЕ: is_first_account=True заменено на is_first_run=True
             newly_collected_protobufs = await collect_points_items(
                 session, steamid, cookies_from_client, urls[0], access_token, is_first_run=True
             )

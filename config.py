@@ -1,1 +1,4 @@
-PROTOBUF_LIST = []
+PROTOBUF_LIST = [
+    "CLG0GBAA",
+    "CLO0GBAA"
+]
