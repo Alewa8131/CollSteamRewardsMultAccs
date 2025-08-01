@@ -31,7 +31,7 @@
 *.out
 *.app
 
-.maFile
-.env
+*.maFile
+*.env
 .idea
 __pycache__
