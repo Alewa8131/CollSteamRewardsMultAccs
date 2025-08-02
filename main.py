@@ -9,14 +9,13 @@ import aiohttp
 from dotenv import load_dotenv
 from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeoutError
 
-# Импортируем список из config.py
-# Убедитесь, что у вас есть файл config.py с пустым словарем PROTOBUF_LIST = {}
-# или с уже известными вам protobuf-идентификаторами
+# Импортируем CONFIG_DATA из config.py
+# Убедитесь, что у вас есть файл config.py с пустым словарем CONFIG_DATA = {"points_shop_protobufs": {}, "free_game_params": {}}
 try:
-    from config import PROTOBUF_LIST
+    from config import CONFIG_DATA
 except ImportError:
-    PROTOBUF_LIST = {}
-    print("Файл config.py не найден или не содержит PROTOBUF_LIST. Создаю временный пустой словарь.")
+    CONFIG_DATA = {"points_shop_protobufs": {}, "free_game_params": {}}
+    print("Файл config.py не найден или не содержит CONFIG_DATA. Создаю временный пустой словарь.")
 
 load_dotenv()
 
@@ -59,34 +58,13 @@ async def get_steam_client(mafile_data: dict):
     return client
 
 
-async def update_protobuf_list_in_config(new_protobuf_dict: dict):
-    """Обновляет словарь PROTOBUF_LIST в config.py."""
-    print(f"Обновляю {CONFIG_FILE_PATH} с новыми protobuf-идентификаторами.")
+async def update_config_data_in_file(config_data: dict):
+    """Обновляет словарь CONFIG_DATA в config.py."""
+    print(f"Обновляю {CONFIG_FILE_PATH} с новыми данными.")
     try:
-        # Читаем текущее содержимое файла
-        if os.path.exists(CONFIG_FILE_PATH):
-            with open(CONFIG_FILE_PATH, 'r', encoding='utf-8') as f:
-                lines = f.readlines()
-        else:
-            lines = []
-
-        # Находим строку с PROTOBUF_LIST и заменяем ее
-        updated_lines = []
-        found = False
-        for line in lines:
-            if line.strip().startswith("PROTOBUF_LIST ="):
-                updated_lines.append(f"PROTOBUF_LIST = {json.dumps(new_protobuf_dict, indent=4)}\n")
-                found = True
-            else:
-                updated_lines.append(line)
-
-        if not found:
-            # Если строка не найдена, добавляем в конец файла
-            updated_lines.append(f"\nPROTOBUF_LIST = {json.dumps(new_protobuf_dict, indent=4)}\n")
-
-        # Записываем обновленное содержимое обратно в файл
+        # Полностью перезаписываем файл, чтобы избежать дублирования
         with open(CONFIG_FILE_PATH, 'w', encoding='utf-8') as f:
-            f.writelines(updated_lines)
+            f.write(f"CONFIG_DATA = {json.dumps(config_data, indent=4)}\n")
         print(f"✅ {CONFIG_FILE_PATH} успешно обновлен.")
     except Exception as e:
         print(f"❌ Ошибка при обновлении {CONFIG_FILE_PATH}: {e}")
@@ -135,11 +113,9 @@ def _parse_multipart_field(multipart_string: str, field_name: str) -> str | None
 
 
 async def collect_points_items(session: aiohttp.ClientSession, steamid: str, cookies: dict, shop_url: str,
-                               access_token: str, protobufs_for_app: list = None):
+                               access_token: str, global_config_data: dict):
     """
     Собирает бесплатные предметы за очки Steam.
-    Если protobufs_for_app предоставлен, использует его для выкупа.
-    Иначе, использует Playwright для сбора protobuf-идентификаторов.
     """
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/108.0.0.0 Safari/537.36',
@@ -147,21 +123,17 @@ async def collect_points_items(session: aiohttp.ClientSession, steamid: str, coo
         'Referer': shop_url,
     }
 
-    # Извлекаем appId из URL
     app_id_match = re.search(r'/app/(\d+)', shop_url)
     app_id = app_id_match.group(1) if app_id_match else "unknown_app"
 
+    protobufs_for_app = global_config_data["points_shop_protobufs"].get(app_id)
     newly_collected_protobufs = []  # Для сбора в текущем Playwright запуске, если он произойдет
+    protobuf_ids_to_use = []  # Инициализация для использования в выкупе
 
-    # ПРОВЕРКА ТИПА URL
-    if "/app/" in shop_url and "/points/shop/" not in shop_url:
+    # Изменено: Запускаем Playwright, если данных нет ИЛИ если список пуст
+    if protobufs_for_app and len(protobufs_for_app) > 0:
         print(
-            f"[{steamid}] Для URL '{shop_url}': Это страница игры, а не магазина очков. Логика для бесплатных игр будет реализована позже. Пропускаю Playwright сбор.")
-        return []  # Возвращаем пустой список, так как для этого AppID не собираем protobufs магазина очков.
-
-    if protobufs_for_app:
-        print(
-            f"[{steamid}] Для AppID {app_id}: Использую уже собранные protobuf-идентификаторы для ускоренного выкупа.")
+            f"[{steamid}] Для AppID {app_id}: Использую уже собранные protobuf-идентификаторы для ускоренного выкупа. Идентификаторы: {protobufs_for_app}")
         protobuf_ids_to_use = protobufs_for_app
     else:
         print(f"[{steamid}] Для AppID {app_id}: Запущен проход (с Playwright) для сбора protobuf-идентификаторов.")
@@ -170,7 +142,6 @@ async def collect_points_items(session: aiohttp.ClientSession, steamid: str, coo
             context = await browser.new_context()
 
             playwright_cookies = []
-            # Итерируем по куки из aiohttp.CookieJar
             for morsel in cookies.values():
                 cookie_dict = {
                     "name": morsel.key,
@@ -178,8 +149,6 @@ async def collect_points_items(session: aiohttp.ClientSession, steamid: str, coo
                     "httpOnly": "httponly" in morsel,
                     "secure": "secure" in morsel,
                 }
-
-                # Обработка sameSite для Playwright
                 same_site_value = morsel.get("samesite")
                 if same_site_value:
                     same_site_value = same_site_value.capitalize()
@@ -189,44 +158,35 @@ async def collect_points_items(session: aiohttp.ClientSession, steamid: str, coo
                     same_site_value = "Lax"
                 cookie_dict["sameSite"] = same_site_value
 
-                # Приоритет 'url' для куки супердоменов или если домен/путь не определены
                 morsel_domain = morsel.get("domain")
                 morsel_path = morsel.get("path")
 
                 if morsel_domain and morsel_domain.startswith('.'):
-                    # Для куки супердоменов (например, .steampowered.com) Playwright предпочитает URL
-                    effective_domain = morsel_domain.lstrip('.')  # Удаляем ведущую точку для построения URL
-                    # Предполагаем HTTPS, так как это Steam Store
+                    effective_domain = morsel_domain.lstrip('.')
                     cookie_dict["url"] = f"https://{effective_domain}{morsel_path if morsel_path else '/'}"
                 elif morsel_domain and morsel_path:
-                    # Если домен и путь явно указаны и это не супердомен
                     cookie_dict["domain"] = morsel_domain
                     cookie_dict["path"] = morsel_path
                 else:
-                    # Fallback к хосту и корневому пути shop_url
                     cookie_dict["domain"] = URL(shop_url).host
                     cookie_dict["path"] = "/"
-
                 playwright_cookies.append(cookie_dict)
             await context.add_cookies(playwright_cookies)
 
             page = await context.new_page()
 
-            # Перехватываем protobuf для RedeemPoints
             async def route_handler(route):
                 request = route.request
                 url = request.url
                 method = request.method
 
-                # Перехватываем protobuf для RedeemPoints
                 if "ILoyaltyRewardsService/RedeemPoints/v1" in url and method == "POST":
-                    post_data_str = request.post_data  # Это сырое строковое содержимое
+                    post_data_str = request.post_data
 
                     if post_data_str:
-                        # Используем вспомогательную функцию для парсинга multipart/form-data
                         redeem_protobuf = _parse_multipart_field(post_data_str, "input_protobuf_encoded")
 
-                        if redeem_protobuf and redeem_protobuf not in newly_collected_protobufs:  # Изменено на local list
+                        if redeem_protobuf and redeem_protobuf not in newly_collected_protobufs:
                             newly_collected_protobufs.append(redeem_protobuf)
                             print(f"[{steamid}] ✅ Playwright: Перехвачен Redeem Protobuf: {redeem_protobuf}")
                         elif not redeem_protobuf:
@@ -241,18 +201,15 @@ async def collect_points_items(session: aiohttp.ClientSession, steamid: str, coo
                 print(f"[{steamid}] Playwright: Перехожу на страницу {shop_url}...")
                 await page.goto(shop_url, wait_until="load", timeout=60000)
 
-                # Ждем, пока все элементы загрузятся, используя более точный селектор
-                await page.wait_for_selector('div.skI5tVFxF4zkY8z56LALc', timeout=30000)  # Увеличенный таймаут
-                await asyncio.sleep(2)  # Уменьшенная задержка для загрузки скриптов и рендеринга
+                await page.wait_for_selector('div.skI5tVFxF4zkY8z56LALc', timeout=30000)
+                await asyncio.sleep(2)
 
-                # Находим все элементы предметов
                 item_elements = await page.query_selector_all('div.skI5tVFxF4zkY8z56LALc')
                 print(f"[{steamid}] Playwright: Найдено {len(item_elements)} потенциальных элементов предметов.")
 
                 for i, item_el in enumerate(item_elements):
                     print(f"[{steamid}] Playwright: --- Обработка предмета #{i + 1} ---")
                     try:
-                        # Используем точный класс для элемента цены
                         price_element = await item_el.query_selector('div.BqFe2n5bs-NKOIO-N-o-P')
 
                         if price_element:
@@ -271,35 +228,29 @@ async def collect_points_items(session: aiohttp.ClientSession, steamid: str, coo
                             print(
                                 f"[{steamid}] Playwright: Найден бесплатный предмет #{i + 1}. Попытка кликнуть по элементу.")
 
-                            # 1. Кликаем по элементу предмета, чтобы открыть модальное окно
                             await item_el.click()
                             print(f"[{steamid}] Playwright: Кликнул по элементу предмета.")
 
-                            # 2. Ждем появления основного контейнера модального окна
                             modal_container_selector = 'dialog._32QRvPPBL733SpNR9x0Gp3'
                             try:
                                 modal_container = await page.wait_for_selector(modal_container_selector, timeout=10000)
                                 print(
                                     f"[{steamid}] Playwright: Главный контейнер модального окна появился (селектор: '{modal_container_selector}').")
 
-                                # Теперь ждем активного содержимого внутри этого контейнера
                                 modal_overlay_content_selector = 'div.ModalOverlayContent.active'
                                 purchase_modal_content = await modal_container.wait_for_selector(
                                     modal_overlay_content_selector, timeout=5000)
                                 print(
                                     f"[{steamid}] Playwright: Активное содержимое модального окна появилось (селектор: '{modal_overlay_content_selector}').")
 
-                                # 3. Попытка найти и кликнуть по кнопке "Бесплатно" для покупки
                                 free_purchase_button = await purchase_modal_content.query_selector(
                                     'div[role="button"]._19X6AbdPOUHqSxNz3mm18i:has(div._2pwsWXANIuk8w8cZ8wvNz:has-text("Бесплатно")), div[role="button"]._19X6AbdPOUHqSxNz3mm18i:has(div._2pwsWXANIuk8w8cZ8wvNz:has-text("Free"))'
                                 )
 
-                                # 4. Попытка найти и кликнуть по кнопке "Использовать сейчас" / "Equip now" для уже имеющихся предметов
                                 equip_now_button = await purchase_modal_content.query_selector(
                                     'button.SRxqV4jytIuP55fxgfpD1._1hcJa9ylImmFKuHsfilos.Focusable:has-text("Использовать сейчас"), button.SRxqV4jytIuP55fxgfpD1._1hcJa9ylImmFKuHsfilos.Focusable:has-text("Equip now")'
                                 )
 
-                                # 5. Новая логика: Попытка найти и кликнуть по кнопке "Позже" / "Later" для уже купленных предметов
                                 later_button_in_modal = await purchase_modal_content.query_selector(
                                     'button._3Ju8vy_foEPg9ILmy2-htb._1hcJa9ylImmFKuHsfilos.Focusable:has-text("Позже"), button._3Ju8vy_foEPg9ILmy2-htb._1hcJa9ylImmFKuHsfilos.Focusable:has-text("Later")'
                                 )
@@ -308,19 +259,17 @@ async def collect_points_items(session: aiohttp.ClientSession, steamid: str, coo
                                     print(
                                         f"[{steamid}] Playwright: Найдена кнопка 'Бесплатно' в модальном окне. Кликаю...")
                                     await free_purchase_button.click()
-                                    await asyncio.sleep(0.5)  # Короткая задержка после клика по покупке
+                                    await asyncio.sleep(0.5)
 
-                                    # Теперь ждем кнопку "Позже" (модальное окно после покупки)
                                     try:
                                         later_button_selector = 'button._3Ju8vy_foEPg9ILmy2-htb._1hcJa9ylImmFKuHsfilos.Focusable:has-text("Позже"), button._3Ju8vy_foEPg9ILmy2-htb._1hcJa9ylImmFKuHsfilos.Focusable:has-text("Later")'
-                                        later_button = await page.wait_for_selector(later_button_selector,
-                                                                                    timeout=5000)  # Меньший таймаут для кнопки "Позже", так как она должна появиться быстро
+                                        later_button = await page.wait_for_selector(later_button_selector, timeout=5000)
                                         if later_button and await later_button.is_visible():
                                             print(f"[{steamid}] Playwright: Найдена кнопка 'Позже'. Кликаю.")
                                             await later_button.click()
                                             print(
                                                 f"[{steamid}] Playwright: ✅ Предмет #{i + 1} успешно куплен и модальное окно закрыто.")
-                                            await asyncio.sleep(0.2)  # Окончательная короткая задержка
+                                            await asyncio.sleep(0.2)
                                         else:
                                             print(
                                                 f"[{steamid}] Playwright: Кнопка 'Позже' не найдена или невидима после покупки. Попытка закрыть модальное окно.")
@@ -335,7 +284,6 @@ async def collect_points_items(session: aiohttp.ClientSession, steamid: str, coo
                                         await _attempt_to_close_any_modal(page, steamid)
 
                                 elif equip_now_button and await equip_now_button.is_visible():
-                                    # Предмет уже куплен, просто кликаем "Позже" или закрываем модальное окно
                                     print(
                                         f"[{steamid}] Playwright: Предмет #{i + 1} уже куплен (обнаружена кнопка 'Использовать сейчас'). Попытка закрыть модальное окно.")
                                     await _attempt_to_close_any_modal(page, steamid)
@@ -343,11 +291,10 @@ async def collect_points_items(session: aiohttp.ClientSession, steamid: str, coo
                                         f"[{steamid}] Playwright: ✅ Предмет #{i + 1} был уже куплен. Модальное окно закрыто.")
 
                                 elif later_button_in_modal and await later_button_in_modal.is_visible():
-                                    # Предмет уже куплен, обнаружена кнопка "Позже"
                                     print(
                                         f"[{steamid}] Playwright: Предмет #{i + 1} уже куплен (обнаружена кнопка 'Позже'). Попытка закрыть модальное окно.")
-                                    await later_button_in_modal.click()  # Кликаем по кнопке "Позже"
-                                    await asyncio.sleep(0.2)  # Короткая задержка
+                                    await later_button_in_modal.click()
+                                    await asyncio.sleep(0.2)
                                     print(
                                         f"[{steamid}] Playwright: ✅ Предмет #{i + 1} был уже куплен. Модальное окно закрыто.")
 
@@ -355,7 +302,6 @@ async def collect_points_items(session: aiohttp.ClientSession, steamid: str, coo
                                     print(
                                         f"[{steamid}] Playwright: В модальном окне не найдена кнопка 'Бесплатно', 'Использовать сейчас' или 'Позже'. Возможно, произошла ошибка или неожиданное состояние.")
                                     try:
-                                        # Используем уже найденный purchase_modal_content ElementHandle для получения его innerHTML
                                         print(
                                             f"[{steamid}] Playwright: Отладка: Inner HTML содержимого модального окна (кнопки не найдены):")
                                         print(await purchase_modal_content.inner_html())
@@ -367,24 +313,22 @@ async def collect_points_items(session: aiohttp.ClientSession, steamid: str, coo
                             except PlaywrightTimeoutError:
                                 print(
                                     f"[{steamid}] Playwright: Таймаут ожидания активного содержимого модального окна. Пропускаю этот предмет.")
-                                await _attempt_to_close_any_modal(page, steamid)  # Всегда пытаемся закрыть
+                                await _attempt_to_close_any_modal(page, steamid)
                             except Exception as modal_e:
                                 print(
                                     f"[{steamid}] Playwright: Ошибка при работе с модальным окном (после клика по предмету): {modal_e}. Пропускаю этот предмет.")
-                                await _attempt_to_close_any_modal(page, steamid)  # Всегда пытаемся закрыть
+                                await _attempt_to_close_any_modal(page, steamid)
 
-                            await asyncio.sleep(0.5)  # Уменьшенная задержка перед следующим предметом
+                            await asyncio.sleep(0.5)
                         else:
                             print(
                                 f"[{steamid}] Playwright: Предмет #{i + 1} не бесплатен (цена: '{price_text}'). Пропускаю.")
                     except PlaywrightTimeoutError:
                         print(f"[{steamid}] Playwright: Таймаут при обработке предмета #{i + 1}. Пропускаю.")
-                        await _attempt_to_close_any_modal(page,
-                                                          steamid)  # Убедитесь, что модальное окно закрыто, если произошел таймаут во время обработки предмета
+                        await _attempt_to_close_any_modal(page, steamid)
                     except Exception as e:
                         print(f"[{steamid}] Playwright: Ошибка при обработке предмета #{i + 1}: {e}")
-                        await _attempt_to_close_any_modal(page,
-                                                          steamid)  # Убедитесь, что модальное окно закрыто, если произошла ошибка во время обработки предмета
+                        await _attempt_to_close_any_modal(page, steamid)
 
             except PlaywrightTimeoutError as e:
                 print(f"[{steamid}] Playwright: Таймаут при загрузке страницы: {e}. Пропускаю.")
@@ -393,56 +337,263 @@ async def collect_points_items(session: aiohttp.ClientSession, steamid: str, coo
             finally:
                 await context.close()
                 await browser.close()
-            protobuf_ids_to_use = newly_collected_protobufs  # Если Playwright был использован, используем собранные protobufs
 
-    # Если мы здесь, значит, Playwright не запускался, и у нас есть protobufs_for_app
-    # Или Playwright запустился и собрал newly_collected_protobufs
-    # Если protobufs_for_app был None, но Playwright что-то собрал, используем newly_collected_protobufs
-    # Если protobufs_for_app был не None, используем его.
-    # Если оба пустые, то protobuf_ids_to_use будет пустым списком.
+            # Если были собраны новые protobufs, сохраняем их
+            if newly_collected_protobufs:
+                global_config_data["points_shop_protobufs"][app_id] = newly_collected_protobufs
+                await update_config_data_in_file(global_config_data)
+                print(
+                    f"[{steamid}] Собрано и сохранено {len(newly_collected_protobufs)} новых protobuf-идентификаторов для AppID {app_id}.")
 
-    if not protobuf_ids_to_use:
-        print(f"[{steamid}] ❌ Список предметов для выкупа пуст для AppID {app_id}. Пропуск.")
-        return None  # Возвращаем None, так как ничего не было выкуплено
+    # Если protobuf_ids_to_use был не пуст, то пытаемся выкупить
+    if protobuf_ids_to_use:  # Это условие проверяет, есть ли что выкупать
+        print(f"[{steamid}] Debug: Final protobuf_ids_to_use for AppID {app_id}: {protobuf_ids_to_use}")
+        print(f"[{steamid}] Начинаю выкуп {len(protobuf_ids_to_use)} предметов для AppID {app_id}.")
 
-    print(f"[{steamid}] Начинаю выкуп {len(protobuf_ids_to_use)} предметов для AppID {app_id}.")
+        redeem_points_base_url = "https://api.steampowered.com/ILoyaltyRewardsService/RedeemPoints/v1/"
+        for item_protobuf_id in protobuf_ids_to_use:
+            redeem_points_url_with_token = f"{redeem_points_base_url}?access_token={access_token}"
 
-    redeem_points_base_url = "https://api.steampowered.com/ILoyaltyRewardsService/RedeemPoints/v1/"
-    for item_protobuf_id in protobuf_ids_to_use:
-        redeem_points_url_with_token = f"{redeem_points_base_url}?access_token={access_token}"
+            payload_redeem_points = {
+                "input_protobuf_encoded": item_protobuf_id
+            }
 
-        payload_redeem_points = {
-            "input_protobuf_encoded": item_protobuf_id
-        }
+            print(f"[{steamid}] Попытка купить предмет (protobuf ID: {item_protobuf_id}) за очки...")
+            try:
+                async with session.post(redeem_points_url_with_token, headers=headers,
+                                        data=payload_redeem_points) as redeem_resp:
+                    response_bytes = await redeem_resp.read()
 
-        print(f"[{steamid}] Попытка купить предмет (protobuf ID: {item_protobuf_id}) за очки...")
-        try:
-            async with session.post(redeem_points_url_with_token, headers=headers,
-                                    data=payload_redeem_points) as redeem_resp:
-                response_bytes = await redeem_resp.read()
+                    if redeem_resp.status == 200 and not response_bytes:
+                        print(f"[{steamid}] 🎁 Успешно куплен предмет (protobuf ID: {item_protobuf_id}) за очки!")
+                    elif redeem_resp.status == 200 and response_bytes:
+                        print(
+                            f"[{steamid}] ℹ️ Покупка завершена, сервер вернул бинарный ответ (вероятно, подтверждение): {response_bytes.hex()}")
+                    else:
+                        print(f"[{steamid}] ❌ Ошибка: статус {redeem_resp.status}, ответ: {response_bytes.hex()}")
 
-                if redeem_resp.status == 200 and not response_bytes:
-                    print(f"[{steamid}] 🎁 Успешно куплен предмет (protobuf ID: {item_protobuf_id}) за очки!")
-                elif redeem_resp.status == 200 and response_bytes:
-                    # Изменено на информационное сообщение
-                    print(
-                        f"[{steamid}] ℹ️ Покупка завершена, сервер вернул бинарный ответ (вероятно, подтверждение): {response_bytes.hex()}")
-                else:
-                    print(f"[{steamid}] ❌ Ошибка: статус {redeem_resp.status}, ответ: {response_bytes.hex()}")
-
-        except Exception as e:
-            print(f"[{steamid}] Ошибка при попытке купить предмет: {e}")
+            except Exception as e:
+                print(f"[{steamid}] Ошибка при попытке купить предмет: {e}")
     return newly_collected_protobufs  # Возвращаем собранные protobufs (если Playwright был использован)
 
 
-async def run_for_account(mafile_path: str, url: str, global_protobuf_list: dict):
+async def claim_free_game(steamid: str, cookies: dict, url: str, app_id: str, global_config_data: dict):
+    """
+    Пытается получить бесплатную игру.
+    Сначала проверяет, не добавлена ли игра уже, затем использует сохраненные параметры, если они есть,
+    иначе использует Playwright для сбора параметров и добавления игры.
+    """
+    print(f"[{steamid}] Попытка получить бесплатную игру по ссылке: {url}")
+
+    # Статические параметры для POST-запроса
+    ADD_LICENSE_URL = "https://store.steampowered.com/freelicense/addfreelicense/"
+    STATIC_PAYLOAD_PARAMS = {
+        'action': 'add_to_cart',
+        'snr': '1_5_9__403',
+        'originating_snr': ''
+    }
+    HEADERS = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36',
+        'Referer': url,
+        'Accept': '*/*',
+        'X-Requested-With': 'XMLHttpRequest',
+        'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8'
+    }
+
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=False)
+        context = await browser.new_context()
+
+        playwright_cookies = []
+        for morsel in cookies.values():
+            cookie_dict = {
+                "name": morsel.key,
+                "value": morsel.value,
+                "httpOnly": "httponly" in morsel,
+                "secure": "secure" in morsel,
+            }
+            same_site_value = morsel.get("samesite")
+            if same_site_value:
+                same_site_value = same_site_value.capitalize()
+                if same_site_value not in ["Strict", "Lax", "None"]:
+                    same_site_value = "Lax"
+            else:
+                same_site_value = "Lax"
+            cookie_dict["sameSite"] = same_site_value
+
+            morsel_domain = morsel.get("domain")
+            morsel_path = morsel.get("path")
+
+            if morsel_domain and morsel_domain.startswith('.'):
+                effective_domain = morsel_domain.lstrip('.')
+                cookie_dict["url"] = f"https://{effective_domain}{morsel_path if morsel_path else '/'}"
+            elif morsel_domain and morsel_path:
+                cookie_dict["domain"] = morsel_domain
+                cookie_dict["path"] = morsel_path
+            else:
+                cookie_dict["domain"] = URL(url).host
+                cookie_dict["path"] = "/"
+            playwright_cookies.append(cookie_dict)
+        await context.add_cookies(playwright_cookies)
+
+        page = await context.new_page()
+
+        try:
+            print(f"[{steamid}] Playwright: Перехожу на страницу игры: {url}...")
+            await page.goto(url, wait_until="load", timeout=60000)
+
+            # --- Проверка на уже купленную игру (кнопка "Играть") ---
+            play_button_selectors = [
+                'div.game_area_already_owned_btn a:has(span:has-text("Играть"))',
+                'div.game_area_already_owned_btn a:has(span:has-text("Play"))',
+                'div.btn_addtocart a[href*="steam://run/"]:has(span:has-text("Играть"))',
+                'div.btn_addtocart a[href*="steam://run/"]:has(span:has-text("Play"))'
+            ]
+
+            for selector in play_button_selectors:
+                play_button = await page.query_selector(selector)
+                if play_button and await play_button.is_visible():
+                    print(f"[{steamid}] ✅ Игра уже на аккаунте (найдена кнопка 'Играть'). Пропускаю.")
+                    await context.close()
+                    await browser.close()
+                    return  # Exit if already owned
+
+            # Всегда получаем актуальный sessionid из куки текущей сессии Playwright
+            cookies_from_page = await context.cookies()
+            current_sessionid = next((c['value'] for c in cookies_from_page if c['name'] == 'sessionid'), None)
+
+            if not current_sessionid:
+                print(
+                    f"[{steamid}] ❌ Не удалось получить текущий sessionid из куки Playwright. Невозможно добавить игру.")
+                await context.close()
+                await browser.close()
+                return
+
+            # Сначала пробуем использовать сохраненные параметры, если они есть.
+            stored_game_params = global_config_data["free_game_params"].get(app_id)
+
+            if stored_game_params:
+                print(
+                    f"[{steamid}] Для AppID {app_id}: Использую уже собранные параметры игры для ускоренного добавления.")
+
+                # Собираем полный payload для запроса, используя сохраненные subid/bundleid и статические/динамические поля
+                payload_for_request = {
+                    **STATIC_PAYLOAD_PARAMS,  # Добавляем статические параметры
+                    **stored_game_params['payload'],  # Добавляем сохраненные subid/bundleid
+                    'sessionid': current_sessionid  # Добавляем актуальный sessionid
+                }
+
+                print(
+                    f"[{steamid}] Отправляю POST-запрос на {ADD_LICENSE_URL} с subid: {payload_for_request.get('subid')} и payload: {payload_for_request}...")
+                resp = await page.request.post(ADD_LICENSE_URL, form=payload_for_request, headers=HEADERS)
+
+                if resp.status == 200:
+                    print(
+                        f"[{steamid}] ✅ Бесплатная игра (subid: {payload_for_request.get('subid')}) успешно добавлена на аккаунт!")
+                else:
+                    print(
+                        f"[{steamid}] ❌ Ошибка: Неуспешный HTTP-статус: {resp.status} ({resp.status_text}) при добавлении игры.")
+
+                await context.close()
+                await browser.close()
+                return  # Выходим, так как мы использовали сохраненные параметры
+
+            # Если мы дошли сюда, значит, сохраненных параметров не было.
+            # Продолжаем извлечение параметров со страницы через Playwright.
+            print(f"[{steamid}] Извлекаю параметры игры со страницы через Playwright.")
+            add_to_account_button_selector = 'a.btn_green_steamui.btn_medium:has(span:has-text("Добавить на аккаунт")), a.btn_green_steamui.btn_medium:has(span:has-text("Add to Account"))'
+            add_button = await page.wait_for_selector(add_to_account_button_selector,
+                                                      timeout=10000)  # Уменьшенный таймаут, так как страница уже загружена
+
+            if add_button:
+                href = await add_button.get_attribute('href')
+                subid_match = re.search(r'addToCart\( (\d+)', href)
+
+                if subid_match:
+                    subid = subid_match.group(1)
+                    print(f"[{steamid}] Найден subid: {subid} из ссылки кнопки.")
+
+                    # Собираем payload для сохранения (только subid и bundleid)
+                    payload_to_save = {'subid': subid}
+
+                    # Проверяем наличие bundleid, если это бандл
+                    # Ищем bundleid в скрытых полях формы, так как он может быть там
+                    bundleid_element = await page.query_selector(
+                        'div.game_area_purchase_game_wrapper input[type="hidden"][name="bundleid"]')
+                    if bundleid_element:
+                        bundleid = await bundleid_element.get_attribute('value')
+                        if bundleid:
+                            payload_to_save['bundleid'] = bundleid
+                            print(f"[{steamid}] Найден bundleid: {payload_to_save['bundleid']} из скрытого поля.")
+                    else:
+                        # Также проверяем, если bundleid может быть в href, хотя это менее вероятно для free licenses
+                        bundleid_match_from_href = re.search(r'addBundleToCart\( (\d+)', href)
+                        if bundleid_match_from_href:
+                            payload_to_save['bundleid'] = bundleid_match_from_href.group(1)
+                            print(
+                                f"[{steamid}] Найден bundleid: {payload_to_save['bundleid']} из ссылки addBundleToCart.")
+
+                    # Собираем полный payload для текущего запроса
+                    payload_for_request = {
+                        **STATIC_PAYLOAD_PARAMS,
+                        **payload_to_save,  # Добавляем subid/bundleid
+                        'sessionid': current_sessionid  # Добавляем актуальный sessionid
+                    }
+
+                    print(
+                        f"[{steamid}] Отправляю POST-запрос на {ADD_LICENSE_URL} через Playwright с subid: {subid} и payload: {payload_for_request}...")
+                    try:
+                        resp = await page.request.post(ADD_LICENSE_URL, form=payload_for_request, headers=HEADERS)
+
+                        if resp.status == 200:
+                            print(f"[{steamid}] ✅ Бесплатная игра (subid: {subid}) успешно добавлена на аккаунт!")
+
+                            # Сохраняем параметры для будущих запусков (только subid и bundleid)
+                            global_config_data["free_game_params"][app_id] = {
+                                'payload': payload_to_save  # Сохраняем payload без sessionid и статических полей
+                            }
+                            await update_config_data_in_file(global_config_data)
+                            print(
+                                f"[{steamid}] Debug: Сохраненный payload для AppID {app_id}: {payload_to_save}")  # Отладочный вывод
+                            print(
+                                f"[{steamid}] Параметры для AppID {app_id} сохранены в config.py (только subid/bundleid).")
+                            try:
+                                response_json = await resp.json()
+                                if response_json.get('success') != 1:  # Если это JSON, проверяем на явную ошибку
+                                    print(
+                                        f"[{steamid}] ⚠️ Сервер вернул JSON, но с неуспешным статусом: {response_json}")
+                            except json.JSONDecodeError:
+                                print(
+                                    f"[{steamid}] ℹ️ Сервер вернул не-JSON ответ. Считаем успешным на основе статуса 200.")
+                        else:
+                            print(
+                                f"[{steamid}] ❌ Ошибка: Неуспешный HTTP-статус: {resp.status} ({resp.status_text}) при добавлении игры.")
+
+                    except Exception as e:
+                        print(f"[{steamid}] Ошибка при отправке POST-запроса для добавления игры через Playwright: {e}")
+
+                else:
+                    print(f"[{steamid}] Не удалось извлечь subid из кнопки 'Добавить на аккаунт' на странице: {url}")
+            else:
+                print(f"[{steamid}] Кнопка 'Добавить на аккаунт' не найдена или игра уже есть на аккаунте: {url}")
+
+        except PlaywrightTimeoutError:
+            print(
+                f"[{steamid}] Playwright: Таймаут ожидания кнопки 'Добавить на аккаунт' на странице: {url}. Возможно, игра уже добавлена или страница загрузилась некорректно.")
+        except Exception as e:
+            print(f"[{steamid}] Playwright: Общая ошибка при обработке бесплатной игры: {e}")
+        finally:
+            await context.close()
+            await browser.close()
+
+
+async def run_for_account(mafile_path: str, urls: list[str], global_config_data: dict):
     """Запускает процесс сбора для одного аккаунта и одного URL."""
     mafile_data = await load_mafile(mafile_path)
     client = await get_steam_client(mafile_data)
     session = client.session
     steamid = mafile_data["Session"]["SteamID"]
 
-    # Получаем access_token после client.login() из куки
     access_token = None
     cookies_from_client = session.cookie_jar.filter_cookies(URL("https://store.steampowered.com"))
 
@@ -460,29 +611,26 @@ async def run_for_account(mafile_path: str, url: str, global_protobuf_list: dict
         return None
 
     try:
-        # Извлекаем appId из URL
-        app_id_match = re.search(r'/app/(\d+)', url)
-        app_id = app_id_match.group(1) if app_id_match else "unknown_app"
+        for url in urls:
+            print(f"\n[{steamid}] Обработка URL: {url}")
 
-        # Проверяем, есть ли уже protobufs для этого appId в глобальном словаре
-        protobufs_for_current_app = global_protobuf_list.get(app_id)
+            app_id_match = re.search(r'/app/(\d+)', url)
+            app_id = app_id_match.group(1) if app_id_match else "unknown_app"
 
-        collected_protobufs_from_run = await collect_points_items(
-            session, steamid, cookies_from_client, url, access_token,
-            protobufs_for_app=protobufs_for_current_app
-        )
+            if "/points/shop/app/" in url:
+                print(
+                    f"[{steamid}] Для URL '{url}': Это страница магазина очков. Будет вызвана функция collect_points_items.")
+                await collect_points_items(session, steamid, cookies_from_client, url, access_token, global_config_data)
+            elif "/app/" in url:
+                print(f"[{steamid}] Для URL '{url}': Это страница игры. Будет вызвана функция claim_free_game.")
+                await claim_free_game(steamid, cookies_from_client, url, app_id, global_config_data)
+            else:
+                print(f"[{steamid}] Неизвестный формат ссылки: {url}. Пропускаю.")
 
-        # Если были собраны новые protobufs (т.е. Playwright был использован для этого appId)
-        if collected_protobufs_from_run:
-            # Обновляем глобальный словарь и сохраняем его
-            global_protobuf_list[app_id] = collected_protobufs_from_run
-            await update_protobuf_list_in_config(global_protobuf_list)
-            print(
-                f"[{steamid}] Собрано и сохранено {len(collected_protobufs_from_run)} новых protobuf-идентификаторов для AppID {app_id}.")
-
+    except Exception as e:
+        print(f"[{mafile_data.get('Session', {}).get('SteamID', 'N/A')}] Общая ошибка при обработке аккаунта: {e}")
     finally:
         await session.close()
-    return None
 
 
 async def main():
@@ -511,20 +659,17 @@ async def main():
 
     print(f"Найдено {len(mafiles)} аккаунтов и {len(urls)} URL для обработки.")
 
-    # Используем глобальный PROTOBUF_LIST из config.py
-    global PROTOBUF_LIST
+    global CONFIG_DATA
 
-    # --- Фаза: Обработка всех аккаунтов (последовательно) ---
     print("\n--- Запуск обработки аккаунтов (последовательно) ---")
-    for mafile in mafiles:  # Итерируем по ma-файлам
+    for mafile in mafiles:
         mafile_data = await load_mafile(mafile)
-        client = None  # Инициализируем client вне try, чтобы он был доступен в finally
+        client = None
         try:
-            client = await get_steam_client(mafile_data)  # Логинимся один раз для аккаунта
+            client = await get_steam_client(mafile_data)
             session = client.session
             steamid = mafile_data["Session"]["SteamID"]
 
-            # Получаем access_token после client.login() из куки
             access_token = None
             cookies_from_client = session.cookie_jar.filter_cookies(URL("https://store.steampowered.com"))
 
@@ -539,36 +684,29 @@ async def main():
             if not access_token:
                 print(
                     f"[{steamid}] ❌ Не удалось получить access_token для аккаунта. Пропуск обработки URL для этого аккаунта.")
-                continue  # Переходим к следующему аккаунту
+                continue
 
-            for url in urls:  # Теперь обрабатываем все URL для этого ОДНОГО авторизованного аккаунта
+            for url in urls:
                 print(f"\n[{steamid}] Обработка URL: {url}")
 
-                # Извлекаем appId из URL
                 app_id_match = re.search(r'/app/(\d+)', url)
                 app_id = app_id_match.group(1) if app_id_match else "unknown_app"
 
-                # Проверяем, есть ли уже protobufs для этого appId в глобальном словаре
-                protobufs_for_current_app = PROTOBUF_LIST.get(app_id)
-
-                collected_protobufs_from_run = await collect_points_items(
-                    session, steamid, cookies_from_client, url, access_token,
-                    protobufs_for_app=protobufs_for_current_app
-                )
-
-                # Если были собраны новые protobufs (т.е. Playwright был использован для этого appId)
-                if collected_protobufs_from_run:
-                    # Обновляем глобальный словарь и сохраняем его
-                    PROTOBUF_LIST[app_id] = collected_protobufs_from_run
-                    await update_protobuf_list_in_config(PROTOBUF_LIST)
+                if "/points/shop/app/" in url:
                     print(
-                        f"[{steamid}] Собрано и сохранено {len(collected_protobufs_from_run)} новых protobuf-идентификаторов для AppID {app_id}.")
+                        f"[{steamid}] Для URL '{url}': Это страница магазина очков. Будет вызвана функция collect_points_items.")
+                    await collect_points_items(session, steamid, cookies_from_client, url, access_token, CONFIG_DATA)
+                elif "/app/" in url:
+                    print(f"[{steamid}] Для URL '{url}': Это страница игры. Будет вызвана функция claim_free_game.")
+                    await claim_free_game(steamid, cookies_from_client, url, app_id, CONFIG_DATA)
+                else:
+                    print(f"[{steamid}] Неизвестный формат ссылки: {url}. Пропускаю.")
 
         except Exception as e:
             print(f"[{mafile_data.get('Session', {}).get('SteamID', 'N/A')}] Общая ошибка при обработке аккаунта: {e}")
         finally:
             if client:
-                await client.session.close()  # Закрываем сессию только после обработки всех URL для аккаунта
+                await client.session.close()
 
     print("\nОбработка завершена.")
 
