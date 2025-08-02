@@ -153,6 +153,12 @@ async def collect_points_items(session: aiohttp.ClientSession, steamid: str, coo
 
     newly_collected_protobufs = []  # Для сбора в текущем Playwright запуске, если он произойдет
 
+    # ПРОВЕРКА ТИПА URL
+    if "/app/" in shop_url and "/points/shop/" not in shop_url:
+        print(
+            f"[{steamid}] Для URL '{shop_url}': Это страница игры, а не магазина очков. Логика для бесплатных игр будет реализована позже. Пропускаю Playwright сбор.")
+        return []  # Возвращаем пустой список, так как для этого AppID не собираем protobufs магазина очков.
+
     if protobufs_for_app:
         print(
             f"[{steamid}] Для AppID {app_id}: Использую уже собранные protobuf-идентификаторы для ускоренного выкупа.")
@@ -387,11 +393,13 @@ async def collect_points_items(session: aiohttp.ClientSession, steamid: str, coo
             finally:
                 await context.close()
                 await browser.close()
-            return newly_collected_protobufs  # Возвращаем только что собранные protobufs
+            protobuf_ids_to_use = newly_collected_protobufs  # Если Playwright был использован, используем собранные protobufs
 
     # Если мы здесь, значит, Playwright не запускался, и у нас есть protobufs_for_app
     # Или Playwright запустился и собрал newly_collected_protobufs
-    protobuf_ids_to_use = protobufs_for_app if protobufs_for_app else newly_collected_protobufs
+    # Если protobufs_for_app был None, но Playwright что-то собрал, используем newly_collected_protobufs
+    # Если protobufs_for_app был не None, используем его.
+    # Если оба пустые, то protobuf_ids_to_use будет пустым списком.
 
     if not protobuf_ids_to_use:
         print(f"[{steamid}] ❌ Список предметов для выкупа пуст для AppID {app_id}. Пропуск.")
@@ -416,14 +424,65 @@ async def collect_points_items(session: aiohttp.ClientSession, steamid: str, coo
                 if redeem_resp.status == 200 and not response_bytes:
                     print(f"[{steamid}] 🎁 Успешно куплен предмет (protobuf ID: {item_protobuf_id}) за очки!")
                 elif redeem_resp.status == 200 and response_bytes:
+                    # Изменено на информационное сообщение
                     print(
-                        f"[{steamid}] ⚠️ Покупка завершена, но сервер вернул бинарный ответ: {response_bytes.hex()}")
+                        f"[{steamid}] ℹ️ Покупка завершена, сервер вернул бинарный ответ (вероятно, подтверждение): {response_bytes.hex()}")
                 else:
                     print(f"[{steamid}] ❌ Ошибка: статус {redeem_resp.status}, ответ: {response_bytes.hex()}")
 
         except Exception as e:
             print(f"[{steamid}] Ошибка при попытке купить предмет: {e}")
     return newly_collected_protobufs  # Возвращаем собранные protobufs (если Playwright был использован)
+
+
+async def run_for_account(mafile_path: str, url: str, global_protobuf_list: dict):
+    """Запускает процесс сбора для одного аккаунта и одного URL."""
+    mafile_data = await load_mafile(mafile_path)
+    client = await get_steam_client(mafile_data)
+    session = client.session
+    steamid = mafile_data["Session"]["SteamID"]
+
+    # Получаем access_token после client.login() из куки
+    access_token = None
+    cookies_from_client = session.cookie_jar.filter_cookies(URL("https://store.steampowered.com"))
+
+    for cookie_name, morsel in cookies_from_client.items():
+        if cookie_name == "steamLoginSecure":
+            match = re.search(r'%7C%7C(.+)', morsel.value)
+            if match:
+                access_token = match.group(1)
+                print(f"[{steamid}] ✅ Получен access_token из steamLoginSecure.")
+                break
+
+    if not access_token:
+        print(f"[{steamid}] ❌ Не удалось получить access_token для аккаунта. Пропуск.")
+        await session.close()
+        return None
+
+    try:
+        # Извлекаем appId из URL
+        app_id_match = re.search(r'/app/(\d+)', url)
+        app_id = app_id_match.group(1) if app_id_match else "unknown_app"
+
+        # Проверяем, есть ли уже protobufs для этого appId в глобальном словаре
+        protobufs_for_current_app = global_protobuf_list.get(app_id)
+
+        collected_protobufs_from_run = await collect_points_items(
+            session, steamid, cookies_from_client, url, access_token,
+            protobufs_for_app=protobufs_for_current_app
+        )
+
+        # Если были собраны новые protobufs (т.е. Playwright был использован для этого appId)
+        if collected_protobufs_from_run:
+            # Обновляем глобальный словарь и сохраняем его
+            global_protobuf_list[app_id] = collected_protobufs_from_run
+            await update_protobuf_list_in_config(global_protobuf_list)
+            print(
+                f"[{steamid}] Собрано и сохранено {len(collected_protobufs_from_run)} новых protobuf-идентификаторов для AppID {app_id}.")
+
+    finally:
+        await session.close()
+    return None
 
 
 async def main():
