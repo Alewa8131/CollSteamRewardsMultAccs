@@ -380,7 +380,9 @@ async def collect_points_items(session: aiohttp.ClientSession, steamid: str, coo
 async def claim_free_game(steamid: str, cookies: dict, url: str, app_id: str, global_config_data: dict):
     """
     Пытается получить бесплатную игру.
-    Сначала проверяет, не добавлена ли игра уже, затем использует сохраненные параметры, если они есть,
+    Сначала проверяет, не добавлена ли игра уже,
+    затем проверяет, является ли игра бесплатной для получения лицензии,
+    затем использует сохраненные параметры, если они есть,
     иначе использует Playwright для сбора параметров и добавления игры.
     """
     print(f"[{steamid}] Попытка получить бесплатную игру по ссылке: {url}")
@@ -442,6 +444,34 @@ async def claim_free_game(steamid: str, cookies: dict, url: str, app_id: str, gl
             print(f"[{steamid}] Playwright: Перехожу на страницу игры: {url}...")
             await page.goto(url, wait_until="load", timeout=60000)
 
+            # --- NEW: Handle Age Verification ---
+            if "/agecheck/app/" in page.url:
+                print(f"[{steamid}] Playwright: Обнаружена страница проверки возраста. Устанавливаю дату рождения.")
+                try:
+                    # Устанавливаем год рождения (например, 1999)
+                    await page.select_option('#ageYear', '1999')
+                    # Можно также установить день и месяц, но для обхода достаточно года
+                    await page.select_option('#ageMonth', 'January')
+                    await page.select_option('#ageDay', '1')
+
+                    # Нажимаем кнопку "Открыть страницу"
+                    await page.click('#view_product_page_btn')
+                    print(
+                        f"[{steamid}] Playwright: Дата рождения установлена, кнопка 'Открыть страницу' нажата. Ожидаю редирект.")
+                    # Ждем, пока страница загрузится после редиректа
+                    await page.wait_for_load_state('load', timeout=30000)
+                except PlaywrightTimeoutError:
+                    print(
+                        f"[{steamid}] Playwright: Таймаут при обработке страницы проверки возраста. Возможно, не удалось перейти на страницу игры.")
+                    await context.close()
+                    await browser.close()
+                    return
+                except Exception as e:
+                    print(f"[{steamid}] Playwright: Ошибка при обработке страницы проверки возраста: {e}")
+                    await context.close()
+                    await browser.close()
+                    return
+
             # --- Проверка на уже купленную игру (кнопка "Играть") ---
             play_button_selectors = [
                 'div.game_area_already_owned_btn a:has(span:has-text("Играть"))',
@@ -457,6 +487,17 @@ async def claim_free_game(steamid: str, cookies: dict, url: str, app_id: str, gl
                     await context.close()
                     await browser.close()
                     return  # Exit if already owned
+
+            # --- Проверка на наличие формы addfreelicense (является ли игра бесплатной для получения лицензии) ---
+            free_license_form_selector = 'form[action="https://store.steampowered.com/freelicense/addfreelicense/"][method="POST"]'
+            free_license_form = await page.query_selector(free_license_form_selector)
+
+            if not free_license_form:
+                print(
+                    f"[{steamid}] ℹ️ Игра по ссылке {url} не является бесплатной или недоступна для получения лицензии (не найдена форма 'addfreelicense'). Пропускаю.")
+                await context.close()
+                await browser.close()
+                return
 
             # Всегда получаем актуальный sessionid из куки текущей сессии Playwright
             cookies_from_page = await context.cookies()
@@ -620,10 +661,10 @@ async def run_for_account(mafile_path: str, urls: list[str], global_config_data:
             if "/points/shop/app/" in url:
                 print(
                     f"[{steamid}] Для URL '{url}': Это страница магазина очков. Будет вызвана функция collect_points_items.")
-                await collect_points_items(session, steamid, cookies_from_client, url, access_token, global_config_data)
+                await collect_points_items(session, steamid, cookies_from_client, url, access_token, CONFIG_DATA)
             elif "/app/" in url:
                 print(f"[{steamid}] Для URL '{url}': Это страница игры. Будет вызвана функция claim_free_game.")
-                await claim_free_game(steamid, cookies_from_client, url, app_id, global_config_data)
+                await claim_free_game(steamid, cookies_from_client, url, app_id, CONFIG_DATA)
             else:
                 print(f"[{steamid}] Неизвестный формат ссылки: {url}. Пропускаю.")
 
