@@ -1,4 +1,8 @@
-PROTOBUF_LIST = [
-    "CLG0GBAA",
-    "CLO0GBAA"
-]
+PROTOBUF_LIST = {
+    "3300150": [
+        "CLK0GBAA",
+        "CLG0GBAA",
+        "CLO0GBAA"
+    ]
+}
+
