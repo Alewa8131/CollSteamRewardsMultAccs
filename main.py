@@ -30,32 +30,41 @@ async def load_mafile(mafile_path: str):
 
 
 async def get_steam_client(mafile_data: dict):
-    """Инициализирует и возвращает объект SteamClient, а также выполняет авторизацию."""
+    """Инициализирует и возвращает объект SteamClient, а также выполняет авторизацию.
+    Возвращает SteamClient объект или None в случае ошибки авторизации."""
     username = mafile_data["account_name"]
     password = os.getenv(f'STEAM_PASS_{username}')
     shared_secret = mafile_data.get("shared_secret")
     steam_id = mafile_data["Session"]["SteamID"]
 
     if not password:
-        raise RuntimeError(f"Пароль для аккаунта '{username}' не найден в .env")
+        print(f"[{steam_id}] ❌ Пароль для аккаунта '{username}' не найден в .env. Пропуск авторизации.")
+        return None
 
-    client = SteamClient(
-        steam_id=steam_id,
-        username=username,
-        password=password,
-        shared_secret=shared_secret
-    )
-
-    print(f"[{steam_id}] Попытка авторизации aiosteampy для аккаунта '{username}'...")
+    client = None  # Инициализируем client как None
+    print(f"[{steam_id}] Попытка авторизации aiosteampy для аккаунта '{username}'...") # Сообщение о попытке авторизации
     try:
+        client = SteamClient(  # Создаем объект SteamClient
+            steam_id=steam_id,
+            username=username,
+            password=password,
+            shared_secret=shared_secret
+        )
         await client.login()
         print(f"[{steam_id}] ✅ aiosteampy авторизация успешна.")
+        return client
+    except KeyError as e:  # Catch specific KeyError for authentication failures
+        print(
+            f"[{steam_id}] ❌ Ошибка aiosteampy авторизации: {e}. Возможно, аккаунт временно заблокирован или требуется повторная попытка. Пропускаю этот аккаунт.")
+        if client:  # Если клиент был создан, закрываем его сессию
+            await client.session.close()
+        return None
     except Exception as e:
         print(
-            f"[{steam_id}] ❌ Ошибка aiosteampy авторизации: {e}. Убедитесь, что пароль в .env верен и maFile актуален.")
-        raise  # Пробрасываем ошибку, так как без авторизации дальше нет смысла
-
-    return client
+            f"[{steam_id}] ❌ Общая ошибка aiosteampy авторизации: {e}. Убедитесь, что пароль в .env верен и maFile актуален. Пропускаю этот аккаунт.")
+        if client:  # Если клиент был создан, закрываем его сессию
+            await client.session.close()
+        return None
 
 
 async def update_config_data_in_file(config_data: dict):
@@ -75,7 +84,6 @@ async def _setup_playwright_page(cookies: dict, initial_url: str, steamid: str) 
     Настраивает Playwright, создает контекст, внедряет куки и переходит на начальный URL.
     Возвращает объект страницы, браузера и контекста.
     """
-    # ИСПРАВЛЕНО: Правильное использование async_playwright() с async with
     p = await async_playwright().start()  # Запускаем Playwright
     browser = await p.chromium.launch(headless=False)
     context = await browser.new_context()
@@ -260,15 +268,16 @@ async def collect_points_items(session: aiohttp.ClientSession, steamid: str, coo
     app_id = app_id_match.group(1) if app_id_match else "unknown_app"
 
     protobufs_for_app = global_config_data["points_shop_protobufs"].get(app_id)
+    newly_collected_protobufs = []  # Для сбора в текущем Playwright запуске, если он произойдет
     protobuf_ids_to_use = []  # Инициализация для использования в выкупе
 
+    # Изменено: Запускаем Playwright, если данных нет ИЛИ если список пуст
     if protobufs_for_app and len(protobufs_for_app) > 0:
         print(
             f"[{steamid}] Для AppID {app_id}: Использую уже собранные protobuf-идентификаторы для ускоренного выкупа. Идентификаторы: {protobufs_for_app}")
         protobuf_ids_to_use = protobufs_for_app
     else:
         print(f"[{steamid}] Для AppID {app_id}: Запущен проход (с Playwright) для сбора protobuf-идентификаторов.")
-        newly_collected_protobufs = []  # Для сбора в текущем Playwright запуске
         browser = None  # Инициализация для finally
         context = None  # Инициализация context для finally
         try:
@@ -351,7 +360,8 @@ async def collect_points_items(session: aiohttp.ClientSession, steamid: str, coo
                             )
 
                             if free_purchase_button and await free_purchase_button.is_visible():
-                                print(f"[{steamid}] Playwright: Найдена кнопка 'Бесплатно' в модальном окне. Кликаю...")
+                                print(
+                                    f"[{steamid}] Playwright: Найдена кнопка 'Бесплатно' в модальном окне. Кликаю...")
                                 await free_purchase_button.click()
                                 await asyncio.sleep(0.5)
 
@@ -440,10 +450,9 @@ async def collect_points_items(session: aiohttp.ClientSession, steamid: str, coo
             await update_config_data_in_file(global_config_data)
             print(
                 f"[{steamid}] Собрано и сохранено {len(newly_collected_protobufs)} новых protobuf-идентификаторов для AppID {app_id}.")
-        protobuf_ids_to_use = newly_collected_protobufs  # Присваиваем для использования в выкупе
 
-    # Логика выкупа, всегда выполняется, если protobuf_ids_to_use заполнен
-    if protobuf_ids_to_use:
+    # Если protobuf_ids_to_use был не пуст, то пытаемся выкупить
+    if protobuf_ids_to_use:  # Это условие проверяет, есть ли что выкупать
         print(f"[{steamid}] Отладка: Окончательные protobuf_ids_to_use для AppID {app_id}: {protobuf_ids_to_use}")
         print(f"[{steamid}] Начинаю выкуп {len(protobuf_ids_to_use)} предметов для AppID {app_id}.")
 
@@ -471,16 +480,16 @@ async def collect_points_items(session: aiohttp.ClientSession, steamid: str, coo
 
             except Exception as e:
                 print(f"[{steamid}] Ошибка при попытке купить предмет: {e}")
+    return newly_collected_protobufs  # Возвращаем собранные protobufs (если Playwright был использован)
 
 
 async def claim_free_game(steamid: str, cookies: dict, url: str, app_id: str, global_config_data: dict):
     """
     Пытается получить бесплатную игру.
-    1. Обрабатывает проверку возраста.
-    2. Проверяет, не добавлена ли игра уже.
-    3. Проверяет, является ли игра бесплатной для получения лицензии (наличие формы addfreelicense).
-    4. Использует сохраненные параметры (subid/bundleid), если они есть, иначе парсит страницу.
-    5. Отправляет запрос на добавление игры.
+    Сначала проверяет, не добавлена ли игра уже,
+    затем проверяет, является ли игра бесплатной для получения лицензии,
+    затем использует сохраненные параметры, если они есть,
+    иначе использует Playwright для сбора параметров и добавления игры.
     """
     print(f"[{steamid}] Попытка получить бесплатную игру по ссылке: {url}")
 
@@ -491,7 +500,8 @@ async def claim_free_game(steamid: str, cookies: dict, url: str, app_id: str, gl
         'originating_snr': ''
     }
 
-    page, browser, context = None, None, None  # Инициализация для finally
+    browser = None  # Инициализация для finally
+    context = None  # Инициализация context для finally
     try:
         page, browser, context = await _setup_playwright_page(cookies, url, steamid)
 
@@ -604,10 +614,15 @@ async def claim_free_game(steamid: str, cookies: dict, url: str, app_id: str, gl
             await context.close()
 
 
-async def run_for_account(mafile_path: str, urls: list[str], global_config_data: dict):
-    """Запускает процесс сбора для одного аккаунта и одного URL."""
+async def run_for_account(mafile_path: str, urls: list[str], global_config_data: dict) -> bool:
+    """Запускает процесс сбора для одного аккаунта и одного URL.
+    Возвращает True в случае успешной обработки, False в случае ошибки авторизации."""
     mafile_data = await load_mafile(mafile_path)
     client = await get_steam_client(mafile_data)
+
+    if client is None:
+        return False
+
     session = client.session
     steamid = mafile_data["Session"]["SteamID"]
 
@@ -623,9 +638,9 @@ async def run_for_account(mafile_path: str, urls: list[str], global_config_data:
                 break
 
     if not access_token:
-        print(f"[{steamid}] ❌ Не удалось получить access_token для аккаунта. Пропуск.")
+        print(f"[{steamid}] ❌ Не удалось получить access_token для аккаунта. Пропуск обработки URL для этого аккаунта.")
         await session.close()
-        return None
+        return False  # Пропускаем этот аккаунт
 
     try:
         for url in urls:
@@ -643,11 +658,13 @@ async def run_for_account(mafile_path: str, urls: list[str], global_config_data:
                 await claim_free_game(steamid, cookies_from_client, url, app_id, CONFIG_DATA)
             else:
                 print(f"[{steamid}] Неизвестный формат ссылки: {url}. Пропускаю.")
-
+        return True
     except Exception as e:
-        print(f"[{mafile_data.get('Session', {}).get('SteamID', 'N/A')}] Общая ошибка при обработке аккаунта: {e}")
+        print(f"[{steamid}] Общая ошибка при обработке аккаунта: {e}")
+        return False
     finally:
-        await session.close()
+        if client:
+            await client.session.close()
 
 
 async def main():
@@ -678,52 +695,26 @@ async def main():
 
     global CONFIG_DATA
 
+    failed_accounts = []  # List to store accounts that failed authentication
+
     print("\n--- Запуск обработки аккаунтов (последовательно) ---")
     for mafile in mafiles:
         mafile_data = await load_mafile(mafile)
-        client = None
-        try:
-            client = await get_steam_client(mafile_data)
-            session = client.session
-            steamid = mafile_data["Session"]["SteamID"]
+        account_name = mafile_data["account_name"] # Получаем имя аккаунта для логирования
 
-            access_token = None
-            cookies_from_client = session.cookie_jar.filter_cookies(URL("https://store.steampowered.com"))
+        # run_for_account теперь возвращает True/False
+        success = await run_for_account(mafile, urls, CONFIG_DATA)
+        if not success:
+            failed_accounts.append(mafile)
 
-            for cookie_name, morsel in cookies_from_client.items():
-                if cookie_name == "steamLoginSecure":
-                    match = re.search(r'%7C%7C(.+)', morsel.value)
-                    if match:
-                        access_token = match.group(1)
-                        print(f"[{steamid}] ✅ Получен access_token из steamLoginSecure.")
-                        break
-
-            if not access_token:
-                print(
-                    f"[{steamid}] ❌ Не удалось получить access_token для аккаунта. Пропуск обработки URL для этого аккаунта.")
-                continue
-
-            for url in urls:
-                print(f"\n[{steamid}] Обработка URL: {url}")
-
-                app_id_match = re.search(r'/app/(\d+)', url)
-                app_id = app_id_match.group(1) if app_id_match else "unknown_app"
-
-                if "/points/shop/app/" in url:
-                    print(
-                        f"[{steamid}] Для URL '{url}': Это страница магазина очков. Будет вызвана функция collect_points_items.")
-                    await collect_points_items(session, steamid, cookies_from_client, url, access_token, CONFIG_DATA)
-                elif "/app/" in url:
-                    print(f"[{steamid}] Для URL '{url}': Это страница игры. Будет вызвана функция claim_free_game.")
-                    await claim_free_game(steamid, cookies_from_client, url, app_id, CONFIG_DATA)
-                else:
-                    print(f"[{steamid}] Неизвестный формат ссылки: {url}. Пропускаю.")
-
-        except Exception as e:
-            print(f"[{mafile_data.get('Session', {}).get('SteamID', 'N/A')}] Общая ошибка при обработке аккаунта: {e}")
-        finally:
-            if client:
-                await client.session.close()
+    if failed_accounts:
+        print("\n--- Аккаунты, требующие повторной попытки авторизации ---")
+        for mafile_path in failed_accounts:
+            mafile_data = await load_mafile(mafile_path)  # Reload data to get account name
+            print(f"- Аккаунт '{mafile_data['account_name']}' ({mafile_path})")
+        print("Пожалуйста, попробуйте запустить скрипт снова позже для этих аккаунтов.")
+    else:
+        print("\nВсе аккаунты обработаны успешно или не требуют повторной попытки.")
 
     print("\nОбработка завершена.")
 
