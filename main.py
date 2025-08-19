@@ -22,6 +22,28 @@ load_dotenv()
 # Путь к файлу config.py для записи
 CONFIG_FILE_PATH = 'config.py'
 
+async def update_config_data_in_file(data: dict):
+    """
+    Обновляет данные в файле config.py, сохраняя все существующие записи.
+
+    Эта функция теперь более устойчива к ошибкам, используя временный файл
+    для атомарного обновления.
+    """
+    # Создаем временный файл
+    tmp_path = CONFIG_FILE_PATH + '.tmp'
+    try:
+        with open(tmp_path, 'w', encoding='utf-8') as f:
+            f.write(f'CONFIG_DATA = {json.dumps(data, indent=4, ensure_ascii=False)}')
+
+        # Переименовываем временный файл, чтобы избежать повреждения
+        os.replace(tmp_path, CONFIG_FILE_PATH)
+        print("✅ Файл config.py успешно обновлен.")
+
+    except Exception as e:
+        print(f"❌ Ошибка при записи в config.py: {e}")
+        # Очищаем временный файл в случае ошибки
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)
 
 async def load_mafile(mafile_path: str):
     """Загружает данные mafile из указанного пути."""
@@ -65,18 +87,6 @@ async def get_steam_client(mafile_data: dict):
         if client:  # Если клиент был создан, закрываем его сессию
             await client.session.close()
         return None
-
-
-async def update_config_data_in_file(config_data: dict):
-    """Обновляет словарь CONFIG_DATA в config.py."""
-    print(f"Обновляю {CONFIG_FILE_PATH} с новыми данными.")
-    try:
-        # Полностью перезаписываем файл, чтобы избежать дублирования
-        with open(CONFIG_FILE_PATH, 'w', encoding='utf-8') as f:
-            f.write(f"CONFIG_DATA = {json.dumps(config_data, indent=4)}\n")
-        print(f"✅ {CONFIG_FILE_PATH} успешно обновлен.")
-    except Exception as e:
-        print(f"❌ Ошибка при обновлении {CONFIG_FILE_PATH}: {e}")
 
 
 async def _setup_playwright_page(cookies: dict, initial_url: str, steamid: str) -> tuple[Page, Browser, BrowserContext]:
@@ -196,61 +206,15 @@ async def _handle_age_verification(page: Page, steamid: str) -> bool:
     return False
 
 
-async def _check_if_game_owned(page: Page, steamid: str) -> bool:
+async def _check_if_game_owned(page: Page, steamid: str):
     """
-    Проверяет, куплена ли игра, ища кнопки "Играть".
-    Возвращает True, если игра куплена, False в противном случае.
+    Проверяет, куплена ли игра.
     """
-    play_button_selectors = [
-        'div.game_area_already_owned_btn a:has(span:has-text("Играть"))',
-        'div.game_area_already_owned_btn a:has(span:has-text("Play"))',
-        'div.btn_addtocart a[href*="steam://run/"]:has(span:has-text("Играть"))',
-        'div.btn_addtocart a[href*="steam://run/"]:has(span:has-text("Play"))'
-    ]
-
-    for selector in play_button_selectors:
-        play_button = await page.query_selector(selector)
-        if play_button and await play_button.is_visible():
-            print(f"[{steamid}] ✅ Игра уже на аккаунте (найдена кнопка 'Играть').")
-            return True
+    owned_div = await page.query_selector("div.game_area_already_owned")
+    if owned_div:
+        print(f"[{steamid}] ℹ️ Игра уже есть в библиотеке. Пропускаю.")
+        return True
     return False
-
-
-async def _send_game_claim_request(page: Page, payload: dict, steamid: str, referer_url: str) -> bool:
-    """
-    Отправляет POST-запрос на добавление бесплатной лицензии игры.
-    Возвращает True в случае успеха, False в случае ошибки.
-    """
-    ADD_LICENSE_URL = "https://store.steampowered.com/freelicense/addfreelicense/"
-    HEADERS = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36',
-        'Referer': referer_url,
-        'Accept': '*/*',
-        'X-Requested-With': 'XMLHttpRequest',
-        'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8'
-    }
-
-    print(
-        f"[{steamid}] Отправляю POST-запрос на {ADD_LICENSE_URL} с subid: {payload.get('subid')} и payload: {payload}...")
-    try:
-        resp = await page.request.post(ADD_LICENSE_URL, form=payload, headers=HEADERS)
-
-        if resp.status == 200:
-            print(f"[{steamid}] ✅ Бесплатная игра (subid: {payload.get('subid')}) успешно добавлена на аккаунт!")
-            try:
-                response_json = await resp.json()
-                if response_json.get('success') != 1:  # Если это JSON, проверяем на явную ошибку
-                    print(f"[{steamid}] ⚠️ Сервер вернул JSON, но с неуспешным статусом: {response_json}")
-            except json.JSONDecodeError:
-                print(f"[{steamid}] ℹ️ Сервер вернул не-JSON ответ. Считаем успешным на основе статуса 200.")
-            return True
-        else:
-            print(
-                f"[{steamid}] ❌ Ошибка: Неуспешный HTTP-статус: {resp.status} ({resp.status_text}) при добавлении игры.")
-            return False
-    except Exception as e:
-        print(f"[{steamid}] Ошибка при отправке POST-запроса для добавления игры: {e}")
-        return False
 
 
 async def collect_points_items(session: aiohttp.ClientSession, steamid: str, cookies: dict, shop_url: str,
@@ -483,140 +447,118 @@ async def collect_points_items(session: aiohttp.ClientSession, steamid: str, coo
     return newly_collected_protobufs  # Возвращаем собранные protobufs (если Playwright был использован)
 
 
-async def claim_free_game(steamid: str, cookies: dict, url: str, app_id: str, global_config_data: dict):
+async def _handle_success_modal(page: Page, steamid: str) -> bool:
     """
-    Пытается получить бесплатную игру.
-    Сначала проверяет, не добавлена ли игра уже,
-    затем проверяет, является ли игра бесплатной для получения лицензии,
-    затем использует сохраненные параметры, если они есть,
-    иначе использует Playwright для сбора параметров и добавления игры.
+    Ищет и закрывает модальное окно после успешного добавления игры.
+    """
+    try:
+        # Селектор для модального окна
+        modal_selector = 'div.newmodal_content_border'
+        modal = await page.wait_for_selector(modal_selector, timeout=2000)
+
+        if modal:
+            print(f"[{steamid}] ✅ Найдено модальное окно успеха. Пытаюсь закрыть его...")
+            # Селектор для кнопки "OK"
+            ok_button_selector = 'div.newmodal_buttons span:has-text("OK"), div.newmodal_buttons span:has-text("ОК")'
+            ok_button = await page.wait_for_selector(ok_button_selector, timeout=2000)
+
+            if ok_button:
+                await ok_button.click()
+                print(f"[{steamid}] ✅ Модальное окно успешно закрыто.")
+                return True
+        return False
+    except PlaywrightTimeoutError:
+        print(f"[{steamid}] Playwright: Модальное окно успеха не появилось в ожидаемое время.")
+        return False
+    except Exception as e:
+        print(f"[{steamid}] Playwright: Ошибка при обработке модального окна: {e}")
+        return False
+
+
+async def _check_and_click_add_button(page: Page, steamid: str) -> str | None:
+    """
+    Проверяет наличие и кликает на кнопку 'Добавить на аккаунт' или 'Add to Account'.
+    Возвращает 'modal' если появляется модальное окно, 'redirect' если происходит переадресация,
+    или None если кнопка не найдена.
+    """
+    # 1. Поиск кнопки "Добавить на аккаунт" / "Add to Account" (с href)
+    add_to_account_selector = (
+        'div.game_area_purchase_game:not(.demo_above_purchase) '
+        'a.btn_green_steamui:has(span:has-text("Добавить на аккаунт")), '
+        'div.game_area_purchase_game:not(.demo_above_purchase) '
+        'a.btn_green_steamui:has(span:has-text("Add to Account"))'
+    )
+    add_to_account_button = await page.query_selector(add_to_account_selector)
+
+    if add_to_account_button and await add_to_account_button.is_visible():
+        print(f"[{steamid}] ✅ Найдена кнопка 'Добавить на аккаунт'. Выполняю клик.")
+        await add_to_account_button.click()
+        await asyncio.sleep(0.2)
+        print(f"[{steamid}] ✅ Кнопка была успешно нажата. Ожидаю переадресацию на страницу подтверждения.")
+        # Так как эта кнопка ведет на страницу, а не на модал, возвращаем 'redirect'
+        return 'redirect'
+
+    # 2. Поиск кнопки "Добавить в библиотеку" / "Add to Library" (с onclick)
+    add_to_library_selector = (
+        'div.game_area_purchase_game:not(.demo_above_purchase) '
+        'span.btn_blue_steamui:has(span:has-text("Добавить в библиотеку")), '
+        'div.game_area_purchase_game:not(.demo_above_purchase) '
+        'span.btn_blue_steamui:has(span:has-text("Add to Library"))'
+    )
+    add_to_library_button = await page.query_selector(add_to_library_selector)
+
+    if add_to_library_button and await add_to_library_button.is_visible():
+        print(f"[{steamid}] ✅ Найдена кнопка 'Добавить в библиотеку'. Выполняю клик.")
+        await add_to_library_button.click()
+        await asyncio.sleep(0.2)
+        print(f"[{steamid}] ✅ Кнопка была успешно нажата. Ожидаю модальное окно.")
+        # Эта кнопка вызывает модальное окно, поэтому возвращаем 'modal'
+        return 'modal'
+
+    print(f"[{steamid}] Кнопка для добавления игры в библиотеку не найдена.")
+    return None
+
+
+async def claim_free_game(steamid: str, cookies: dict, url: str):
+    """
+    Пытается получить бесплатную игру, используя только Playwright для имитации действий пользователя.
     """
     print(f"[{steamid}] Попытка получить бесплатную игру по ссылке: {url}")
 
-    # Статические параметры для POST-запроса
-    STATIC_PAYLOAD_PARAMS = {
-        'action': 'add_to_cart',
-        'snr': '1_5_9__403',
-        'originating_snr': ''
-    }
-
-    browser = None  # Инициализация для finally
-    context = None  # Инициализация context для finally
+    browser = None
+    context = None
     try:
+        # Всегда начинаем с Playwright для получения актуальной сессии
         page, browser, context = await _setup_playwright_page(cookies, url, steamid)
 
-        # 1. Обработка проверки возраста
-        if await _handle_age_verification(page, steamid):
-            pass  # Продолжаем выполнение, так как страница должна быть загружена
+        # Обработка проверки возраста
+        await _handle_age_verification(page, steamid)
 
-        # 2. Проверка на уже купленную игру (кнопка "Играть")
+        # Проверяем, куплена ли игра
         if await _check_if_game_owned(page, steamid):
-            return  # Игра уже куплена, выходим
-
-        # 3. Проверка на наличие формы addfreelicense (является ли игра бесплатной для получения лицензии)
-        free_license_form_selector = 'form[action="https://store.steampowered.com/freelicense/addfreelicense/"][method="POST"]'
-        free_license_form = await page.query_selector(free_license_form_selector)
-
-        if not free_license_form:
-            print(
-                f"[{steamid}] ℹ️ Игра по ссылке {url} не является бесплатной или недоступна для получения лицензии (не найдена форма 'addfreelicense'). Пропускаю.")
             return
 
-        # Всегда получаем актуальный sessionid из куки текущей сессии Playwright
-        cookies_from_page = await context.cookies()
-        current_sessionid = next((c['value'] for c in cookies_from_page if c['name'] == 'sessionid'), None)
+        # Прямой переход к клику на кнопку, без попыток POST-запроса
+        print(f"[{steamid}] Использую Playwright для имитации нажатия кнопки.")
+        action_type = await _check_and_click_add_button(page, steamid)
+        if action_type == 'modal':
+            await _handle_success_modal(page, steamid)
+        elif action_type == 'redirect':
+            print(f"[{steamid}] ✅ Игра успешно добавлена (переадресация на страницу подтверждения).")
 
-        if not current_sessionid:
-            print(f"[{steamid}] ❌ Не удалось получить текущий sessionid из куки Playwright. Невозможно добавить игру.")
-            return
-
-        # 4. Сначала пробуем использовать сохраненные параметры, если они есть.
-        stored_game_params = global_config_data["free_game_params"].get(app_id)
-
-        if stored_game_params:
-            print(f"[{steamid}] Для AppID {app_id}: Использую уже собранные параметры игры для ускоренного добавления.")
-
-            # Собираем полный payload для запроса, используя сохраненные subid/bundleid и статические/динамические поля
-            payload_for_request = {
-                **STATIC_PAYLOAD_PARAMS,  # Добавляем статические параметры
-                **stored_game_params['payload'],  # Добавляем сохраненные subid/bundleid
-                'sessionid': current_sessionid  # Добавляем актуальный sessionid
-            }
-
-            if await _send_game_claim_request(page, payload_for_request, steamid, url):
-                return  # Успешно добавлено с использованием сохраненных параметров
-
-        # Если мы дошли сюда, значит, сохраненных параметров не было или они не сработали.
-        # Продолжаем извлечение параметров со страницы через Playwright.
-        print(f"[{steamid}] Извлекаю параметры игры со страницы через Playwright.")
-        add_to_account_button_selector = 'a.btn_green_steamui.btn_medium:has(span:has-text("Добавить на аккаунт")), a.btn_green_steamui.btn_medium:has(span:has-text("Add to Account"))'
-        add_button = await page.wait_for_selector(add_to_account_button_selector,
-                                                  timeout=10000)  # Уменьшенный таймаут, так как страница уже загружена
-
-        if add_button:
-            href = await add_button.get_attribute('href')
-            subid_match = re.search(r'addToCart\( (\d+)', href)
-
-            if subid_match:
-                subid = subid_match.group(1)
-                print(f"[{steamid}] Найден subid: {subid} из ссылки кнопки.")
-
-                # Собираем payload для сохранения (только subid и bundleid)
-                payload_to_save = {'subid': subid}
-
-                # Проверяем наличие bundleid, если это бандл
-                # Ищем bundleid в скрытых полях формы, так как он может быть там
-                bundleid_element = await page.query_selector(
-                    'div.game_area_purchase_game_wrapper input[type="hidden"][name="bundleid"]')
-                if bundleid_element:
-                    bundleid = await bundleid_element.get_attribute('value')
-                    if bundleid:
-                        payload_to_save['bundleid'] = bundleid
-                        print(f"[{steamid}] Найден bundleid: {payload_to_save['bundleid']} из скрытого поля.")
-                else:
-                    # Также проверяем, если bundleid может быть в href, хотя это менее вероятно для free licenses
-                    bundleid_match_from_href = re.search(r'addBundleToCart\( (\d+)', href)
-                    if bundleid_match_from_href:
-                        payload_to_save['bundleid'] = bundleid_match_from_href.group(1)
-                        print(f"[{steamid}] Найден bundleid: {payload_to_save['bundleid']} из ссылки addBundleToCart.")
-
-                # Собираем полный payload для текущего запроса
-                payload_for_request = {
-                    **STATIC_PAYLOAD_PARAMS,
-                    **payload_to_save,  # Добавляем subid/bundleid
-                    'sessionid': current_sessionid  # Добавляем актуальный sessionid
-                }
-
-                if await _send_game_claim_request(page, payload_for_request, steamid, url):
-                    # Сохраняем параметры для будущих запусков (только subid и bundleid)
-                    global_config_data["free_game_params"][app_id] = {
-                        'payload': payload_to_save  # Сохраняем payload без sessionid и статических полей
-                    }
-                    await update_config_data_in_file(global_config_data)
-                    print(
-                        f"[{steamid}] Отладка: Сохраненный payload для AppID {app_id}: {payload_to_save}")  # Отладочный вывод
-                    print(f"[{steamid}] Параметры для AppID {app_id} сохранены в config.py (только subid/bundleid).")
-
-            else:
-                print(f"[{steamid}] Не удалось извлечь subid из кнопки 'Добавить на аккаунт' на странице: {url}")
-        else:
-            print(f"[{steamid}] Кнопка 'Добавить на аккаунт' не найдена или игра уже есть на аккаунте: {url}")
-
-    except PlaywrightTimeoutError:
-        print(
-            f"[{steamid}] Playwright: Таймаут ожидания элементов на странице: {url}. Возможно, игра уже добавлена или страница загрузилась некорректно.")
+    except PlaywrightTimeoutError as e:
+        print(f"[{steamid}] Playwright: Таймаут при загрузке страницы: {e}. Пропускаю.")
     except Exception as e:
-        print(f"[{steamid}] Playwright: Общая ошибка при обработке бесплатной игры: {e}")
+        print(f"[{steamid}] Playwright: Общая ошибка при работе Playwright: {e}. Пропускаю.")
     finally:
         if browser:
             await browser.close()
-        if context:  # Закрываем контекст, если он был создан
-            await context.close()
 
 
-async def run_for_account(mafile_path: str, urls: list[str], global_config_data: dict) -> bool:
-    """Запускает процесс сбора для одного аккаунта и одного URL.
-    Возвращает True в случае успешной обработки, False в случае ошибки авторизации."""
+async def run_for_account(mafile_path: str, urls: list[str], config_data: dict) -> bool:
+    """
+    Основная функция для авторизации и обработки URL для одного аккаунта.
+    """
     mafile_data = await load_mafile(mafile_path)
     client = await get_steam_client(mafile_data)
 
@@ -644,20 +586,20 @@ async def run_for_account(mafile_path: str, urls: list[str], global_config_data:
 
     try:
         for url in urls:
-            print(f"\n[{steamid}] Обработка URL: {url}")
-
-            app_id_match = re.search(r'/app/(\d+)', url)
-            app_id = app_id_match.group(1) if app_id_match else "unknown_app"
-
-            if "/points/shop/app/" in url:
-                print(
-                    f"[{steamid}] Для URL '{url}': Это страница магазина очков. Будет вызвана функция collect_points_items.")
-                await collect_points_items(session, steamid, cookies_from_client, url, access_token, CONFIG_DATA)
-            elif "/app/" in url:
-                print(f"[{steamid}] Для URL '{url}': Это страница игры. Будет вызвана функция claim_free_game.")
-                await claim_free_game(steamid, cookies_from_client, url, app_id, CONFIG_DATA)
+            print(f"[{steamid}] Обработка URL: {url}")
+            # Проверяем, является ли URL магазином очков Steam
+            if 'store.steampowered.com/points/shop' in url:
+                await collect_points_items(session, steamid, cookies_from_client, url, access_token, config_data)
+            # Проверяем, является ли URL страницей игры
+            elif '/app/' in url:
+                app_id_match = re.search(r'/app/(\d+)', url)
+                if app_id_match:
+                    await claim_free_game(steamid, cookies_from_client, url)
+                else:
+                    print(f"[{steamid}] ❌ Не удалось извлечь AppID из URL: {url}")
             else:
-                print(f"[{steamid}] Неизвестный формат ссылки: {url}. Пропускаю.")
+                print(f"[{steamid}] ⚠️ Неподдерживаемый URL: {url}. Пропускаю.")
+
         return True
     except Exception as e:
         print(f"[{steamid}] Общая ошибка при обработке аккаунта: {e}")
