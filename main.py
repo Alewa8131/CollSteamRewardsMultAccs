@@ -190,11 +190,11 @@ async def _handle_age_verification(page: Page, steamid: str) -> bool:
             await page.select_option('#ageDay', '1')
 
             # Нажимаем кнопку "Открыть страницу"
+            old_url = page.url
             await page.click('#view_product_page_btn')
-            print(
-                f"[{steamid}] Playwright: Дата рождения установлена, кнопка 'Открыть страницу' нажата. Ожидаю редирект.")
-            # Ждем, пока страница загрузится после редиректа
-            await page.wait_for_load_state('load', timeout=30000)
+            print(f"[{steamid}] Playwright: Кнопка 'Открыть страницу' нажата. Ожидаю редирект...")
+            await page.wait_for_function(f"window.location.href !== '{old_url}'", timeout=30000)
+            await page.wait_for_load_state('load')
             return True
         except PlaywrightTimeoutError:
             print(
@@ -514,6 +514,23 @@ async def _check_and_click_add_button(page: Page, steamid: str) -> str | None:
         print(f"[{steamid}] ✅ Кнопка была успешно нажата. Ожидаю модальное окно.")
         # Эта кнопка вызывает модальное окно, поэтому возвращаем 'modal'
         return 'modal'
+
+    # 3. Поиск кнопки "Установить игру" / "Install Game" / "Загрузить" / "Download"
+    install_game_selector = (
+        'a.btn_green_steamui.btn_medium[href^="javascript:addToCart"]:has(span:has-text("Установить игру")), '
+        'a.btn_green_steamui.btn_medium[href^="javascript:addToCart"]:has(span:has-text("Install Game")), '
+        'a.btn_green_steamui.btn_medium[href^="javascript:addToCart"]:has(span:has-text("Загрузить")), '
+        'a.btn_green_steamui.btn_medium[href^="javascript:addToCart"]:has(span:has-text("Download"))'
+    )
+
+    install_game_button = await page.query_selector(install_game_selector)
+    if install_game_button and await install_game_button.is_visible():
+        print(f"[{steamid}] ✅ Найдена кнопка 'Установить игру' / 'Загрузить'. Выполняю клик.")
+        await install_game_button.click()
+        await asyncio.sleep(0.2)
+        print(f"[{steamid}] ✅ Кнопка была успешно нажата. Ожидаю переадресацию на страницу подтверждения.")
+        # Так как эта кнопка ведет на страницу, а не на модал, возвращаем 'redirect'
+        return 'redirect'
 
     print(f"[{steamid}] Кнопка для добавления игры в библиотеку не найдена.")
     return None
