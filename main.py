@@ -3,7 +3,6 @@ import json
 import os
 import re
 from aiosteampy.client import SteamClient
-from bs4 import BeautifulSoup
 from yarl import URL
 import aiohttp
 from dotenv import load_dotenv
@@ -88,12 +87,18 @@ async def get_steam_client(mafile_data: dict):
             await client.session.close()
         return None
 
+def normalize_steam_url(url: str) -> str:
+    url = url.strip()
+    if not url.startswith(("http://", "https://")):
+        url = "https://" + url
+    return url
 
 async def _setup_playwright_page(cookies: dict, initial_url: str, steamid: str) -> tuple[Page, Browser, BrowserContext]:
     """
     Настраивает Playwright, создает контекст, внедряет куки и переходит на начальный URL.
     Возвращает объект страницы, браузера и контекста.
     """
+    initial_url = normalize_steam_url(initial_url)
     p = await async_playwright().start()  # Запускаем Playwright
     browser = await p.chromium.launch(headless=False)
     context = await browser.new_context()
