@@ -8,8 +8,6 @@ import aiohttp
 from dotenv import load_dotenv
 from playwright.async_api import async_playwright, Page, Browser, BrowserContext, TimeoutError as PlaywrightTimeoutError
 
-# Импортируем CONFIG_DATA из config.py
-# Убедитесь, что у вас есть файл config.py с пустым словарем CONFIG_DATA = {"points_shop_protobufs": {}, "free_game_params": {}}
 try:
     from config import CONFIG_DATA
 except ImportError:
@@ -18,7 +16,6 @@ except ImportError:
 
 load_dotenv()
 
-# Путь к файлу config.py для записи
 CONFIG_FILE_PATH = 'config.py'
 
 async def update_config_data_in_file(data: dict):
@@ -28,19 +25,16 @@ async def update_config_data_in_file(data: dict):
     Эта функция теперь более устойчива к ошибкам, используя временный файл
     для атомарного обновления.
     """
-    # Создаем временный файл
     tmp_path = CONFIG_FILE_PATH + '.tmp'
     try:
         with open(tmp_path, 'w', encoding='utf-8') as f:
             f.write(f'CONFIG_DATA = {json.dumps(data, indent=4, ensure_ascii=False)}')
 
-        # Переименовываем временный файл, чтобы избежать повреждения
         os.replace(tmp_path, CONFIG_FILE_PATH)
         print("✅ Файл config.py успешно обновлен.")
 
     except Exception as e:
         print(f"❌ Ошибка при записи в config.py: {e}")
-        # Очищаем временный файл в случае ошибки
         if os.path.exists(tmp_path):
             os.remove(tmp_path)
 
@@ -63,9 +57,9 @@ async def get_steam_client(mafile_data: dict):
         return None
 
     client = None  # Инициализируем client как None
-    print(f"[{steam_id}] Попытка авторизации aiosteampy для аккаунта '{username}'...") # Сообщение о попытке авторизации
+    print(f"[{steam_id}] Попытка авторизации aiosteampy для аккаунта '{username}'...")
     try:
-        client = SteamClient(  # Создаем объект SteamClient
+        client = SteamClient(
             steam_id=steam_id,
             username=username,
             password=password,
@@ -74,16 +68,16 @@ async def get_steam_client(mafile_data: dict):
         await client.login()
         print(f"[{steam_id}] ✅ aiosteampy авторизация успешна.")
         return client
-    except KeyError as e:  # Catch specific KeyError for authentication failures
+    except KeyError as e:
         print(
             f"[{steam_id}] ❌ Ошибка aiosteampy авторизации: {e}. Возможно, аккаунт временно заблокирован или требуется повторная попытка. Пропускаю этот аккаунт.")
-        if client:  # Если клиент был создан, закрываем его сессию
+        if client:
             await client.session.close()
         return None
     except Exception as e:
         print(
             f"[{steam_id}] ❌ Общая ошибка aiosteampy авторизации: {e}. Убедитесь, что пароль в .env верен и maFile актуален. Пропускаю этот аккаунт.")
-        if client:  # Если клиент был создан, закрываем его сессию
+        if client:
             await client.session.close()
         return None
 
@@ -99,7 +93,7 @@ async def _setup_playwright_page(cookies: dict, initial_url: str, steamid: str) 
     Возвращает объект страницы, браузера и контекста.
     """
     initial_url = normalize_steam_url(initial_url)
-    p = await async_playwright().start()  # Запускаем Playwright
+    p = await async_playwright().start()
     browser = await p.chromium.launch(headless=False)
     context = await browser.new_context()
 
@@ -145,12 +139,11 @@ async def _attempt_to_close_any_modal(page: Page, steamid: str):
     """Попытка закрыть любое открытое модальное окно или оверлей."""
     print(f"[{steamid}] Playwright: Попытка закрыть любое открытое модальное окно.")
     try:
-        # Приоритет кнопки "Позже" / "Later", затем общие кнопки закрытия
         close_button_selectors = [
             'button._3Ju8vy_foEPg9ILmy2-htb._1hcJa9ylImmFKuHsfilos.Focusable:has-text("Позже")',
             'button._3Ju8vy_foEPg9ILmy2-htb._1hcJa9ylImmFKuHsfilos.Focusable:has-text("Later")',
-            'button[aria-label="Close"]',  # Общая кнопка закрытия для диалогов
-            'div[class*="ModalPosition_TopBar"] button',  # Кнопка закрытия в верхней панели
+            'button[aria-label="Close"]',
+            'div[class*="ModalPosition_TopBar"] button',
             'button:has-text("Отмена")',
             'button:has-text("Cancel")'
         ]
@@ -160,8 +153,8 @@ async def _attempt_to_close_any_modal(page: Page, steamid: str):
             if close_button and await close_button.is_visible():
                 print(f"[{steamid}] Playwright: Найдена кнопка закрытия/отмены по селектору '{selector}'. Кликаю.")
                 await close_button.click()
-                await asyncio.sleep(0.2)  # Уменьшенная задержка
-                return True  # Успешно закрыли
+                await asyncio.sleep(0.2)
+                return True
         print(f"[{steamid}] Playwright: Кнопка закрытия/отмены не найдена.")
         return False
     except Exception as e:
@@ -188,13 +181,10 @@ async def _handle_age_verification(page: Page, steamid: str) -> bool:
     if "/agecheck/app/" in page.url:
         print(f"[{steamid}] Playwright: Обнаружена страница проверки возраста. Устанавливаю дату рождения.")
         try:
-            # Устанавливаем год рождения (например, 1999)
             await page.select_option('#ageYear', '1999')
-            # Можно также установить день и месяц, но для обхода достаточно года
             await page.select_option('#ageMonth', 'January')
             await page.select_option('#ageDay', '1')
 
-            # Нажимаем кнопку "Открыть страницу"
             old_url = page.url
             await page.click('#view_product_page_btn')
             print(f"[{steamid}] Playwright: Кнопка 'Открыть страницу' нажата. Ожидаю редирект...")
@@ -237,18 +227,17 @@ async def collect_points_items(session: aiohttp.ClientSession, steamid: str, coo
     app_id = app_id_match.group(1) if app_id_match else "unknown_app"
 
     protobufs_for_app = global_config_data["points_shop_protobufs"].get(app_id)
-    newly_collected_protobufs = []  # Для сбора в текущем Playwright запуске, если он произойдет
-    protobuf_ids_to_use = []  # Инициализация для использования в выкупе
+    newly_collected_protobufs = []
+    protobuf_ids_to_use = []
 
-    # Изменено: Запускаем Playwright, если данных нет ИЛИ если список пуст
     if protobufs_for_app and len(protobufs_for_app) > 0:
         print(
             f"[{steamid}] Для AppID {app_id}: Использую уже собранные protobuf-идентификаторы для ускоренного выкупа. Идентификаторы: {protobufs_for_app}")
         protobuf_ids_to_use = protobufs_for_app
     else:
         print(f"[{steamid}] Для AppID {app_id}: Запущен проход (с Playwright) для сбора protobuf-идентификаторов.")
-        browser = None  # Инициализация для finally
-        context = None  # Инициализация context для finally
+        browser = None
+        context = None
         try:
             page, browser, context = await _setup_playwright_page(cookies, shop_url, steamid)
 
@@ -410,18 +399,16 @@ async def collect_points_items(session: aiohttp.ClientSession, steamid: str, coo
         finally:
             if browser:
                 await browser.close()
-            if context:  # Закрываем контекст, если он был создан
+            if context:
                 await context.close()
 
-        # Если были собраны новые protobufs, сохраняем их
         if newly_collected_protobufs:
             global_config_data["points_shop_protobufs"][app_id] = newly_collected_protobufs
             await update_config_data_in_file(global_config_data)
             print(
                 f"[{steamid}] Собрано и сохранено {len(newly_collected_protobufs)} новых protobuf-идентификаторов для AppID {app_id}.")
 
-    # Если protobuf_ids_to_use был не пуст, то пытаемся выкупить
-    if protobuf_ids_to_use:  # Это условие проверяет, есть ли что выкупать
+    if protobuf_ids_to_use:
         print(f"[{steamid}] Отладка: Окончательные protobuf_ids_to_use для AppID {app_id}: {protobuf_ids_to_use}")
         print(f"[{steamid}] Начинаю выкуп {len(protobuf_ids_to_use)} предметов для AppID {app_id}.")
 
@@ -449,7 +436,7 @@ async def collect_points_items(session: aiohttp.ClientSession, steamid: str, coo
 
             except Exception as e:
                 print(f"[{steamid}] Ошибка при попытке купить предмет: {e}")
-    return newly_collected_protobufs  # Возвращаем собранные protobufs (если Playwright был использован)
+    return newly_collected_protobufs
 
 
 async def _handle_success_modal(page: Page, steamid: str) -> bool:
@@ -457,13 +444,11 @@ async def _handle_success_modal(page: Page, steamid: str) -> bool:
     Ищет и закрывает модальное окно после успешного добавления игры.
     """
     try:
-        # Селектор для модального окна
         modal_selector = 'div.newmodal_content_border'
         modal = await page.wait_for_selector(modal_selector, timeout=2000)
 
         if modal:
             print(f"[{steamid}] ✅ Найдено модальное окно успеха. Пытаюсь закрыть его...")
-            # Селектор для кнопки "OK"
             ok_button_selector = 'div.newmodal_buttons span:has-text("OK"), div.newmodal_buttons span:has-text("ОК")'
             ok_button = await page.wait_for_selector(ok_button_selector, timeout=2000)
 
@@ -500,7 +485,6 @@ async def _check_and_click_add_button(page: Page, steamid: str) -> str | None:
         await add_to_account_button.click()
         await asyncio.sleep(0.2)
         print(f"[{steamid}] ✅ Кнопка была успешно нажата. Ожидаю переадресацию на страницу подтверждения.")
-        # Так как эта кнопка ведет на страницу, а не на модал, возвращаем 'redirect'
         return 'redirect'
 
     # 2. Поиск кнопки "Добавить в библиотеку" / "Add to Library" (с onclick)
@@ -517,7 +501,6 @@ async def _check_and_click_add_button(page: Page, steamid: str) -> str | None:
         await add_to_library_button.click()
         await asyncio.sleep(0.2)
         print(f"[{steamid}] ✅ Кнопка была успешно нажата. Ожидаю модальное окно.")
-        # Эта кнопка вызывает модальное окно, поэтому возвращаем 'modal'
         return 'modal'
 
     # 3. Поиск кнопки "Установить игру" / "Install Game" / "Загрузить" / "Download"
@@ -534,7 +517,6 @@ async def _check_and_click_add_button(page: Page, steamid: str) -> str | None:
         await install_game_button.click()
         await asyncio.sleep(0.2)
         print(f"[{steamid}] ✅ Кнопка была успешно нажата. Ожидаю переадресацию на страницу подтверждения.")
-        # Так как эта кнопка ведет на страницу, а не на модал, возвращаем 'redirect'
         return 'redirect'
 
     print(f"[{steamid}] Кнопка для добавления игры в библиотеку не найдена.")
@@ -550,17 +532,13 @@ async def claim_free_game(steamid: str, cookies: dict, url: str):
     browser = None
     context = None
     try:
-        # Всегда начинаем с Playwright для получения актуальной сессии
         page, browser, context = await _setup_playwright_page(cookies, url, steamid)
 
-        # Обработка проверки возраста
         await _handle_age_verification(page, steamid)
 
-        # Проверяем, куплена ли игра
         if await _check_if_game_owned(page, steamid):
             return
 
-        # Прямой переход к клику на кнопку, без попыток POST-запроса
         print(f"[{steamid}] Использую Playwright для имитации нажатия кнопки.")
         action_type = await _check_and_click_add_button(page, steamid)
         if action_type == 'modal':
@@ -604,15 +582,13 @@ async def run_for_account(mafile_path: str, urls: list[str], config_data: dict) 
     if not access_token:
         print(f"[{steamid}] ❌ Не удалось получить access_token для аккаунта. Пропуск обработки URL для этого аккаунта.")
         await session.close()
-        return False  # Пропускаем этот аккаунт
+        return False
 
     try:
         for url in urls:
             print(f"[{steamid}] Обработка URL: {url}")
-            # Проверяем, является ли URL магазином очков Steam
             if 'store.steampowered.com/points/shop' in url:
                 await collect_points_items(session, steamid, cookies_from_client, url, access_token, config_data)
-            # Проверяем, является ли URL страницей игры
             elif '/app/' in url:
                 app_id_match = re.search(r'/app/(\d+)', url)
                 if app_id_match:
@@ -659,14 +635,10 @@ async def main():
 
     global CONFIG_DATA
 
-    failed_accounts = []  # List to store accounts that failed authentication
+    failed_accounts = []
 
     print("\n--- Запуск обработки аккаунтов (последовательно) ---")
     for mafile in mafiles:
-        mafile_data = await load_mafile(mafile)
-        account_name = mafile_data["account_name"] # Получаем имя аккаунта для логирования
-
-        # run_for_account теперь возвращает True/False
         success = await run_for_account(mafile, urls, CONFIG_DATA)
         if not success:
             failed_accounts.append(mafile)
@@ -674,7 +646,7 @@ async def main():
     if failed_accounts:
         print("\n--- Аккаунты, требующие повторной попытки авторизации ---")
         for mafile_path in failed_accounts:
-            mafile_data = await load_mafile(mafile_path)  # Reload data to get account name
+            mafile_data = await load_mafile(mafile_path)
             print(f"- Аккаунт '{mafile_data['account_name']}' ({mafile_path})")
         print("Пожалуйста, попробуйте запустить скрипт снова позже для этих аккаунтов.")
     else:
