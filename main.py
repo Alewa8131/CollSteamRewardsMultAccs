@@ -17,14 +17,11 @@ except ImportError:
 load_dotenv()
 
 CONFIG_FILE_PATH = 'config.py'
+MAFILES_DIR = "./maFiles"
+URLS_FILE = "urls.txt"
 
 async def update_config_data_in_file(data: dict):
-    """
-    Обновляет данные в файле config.py, сохраняя все существующие записи.
-
-    Эта функция теперь более устойчива к ошибкам, используя временный файл
-    для атомарного обновления.
-    """
+    """Атомарно обновляет CONFIG_DATA в config.py."""
     tmp_path = CONFIG_FILE_PATH + '.tmp'
     try:
         with open(tmp_path, 'w', encoding='utf-8') as f:
@@ -43,124 +40,10 @@ async def load_mafile(mafile_path: str):
     with open(mafile_path, "r", encoding="utf-8") as f:
         return json.load(f)
 
-
-async def get_steam_client(mafile_data: dict):
-    """Инициализирует и возвращает объект SteamClient, а также выполняет авторизацию.
-    Возвращает SteamClient объект или None в случае ошибки авторизации."""
-    username = mafile_data["account_name"]
-    password = os.getenv(f'STEAM_PASS_{username}')
-    shared_secret = mafile_data.get("shared_secret")
-    steam_id = mafile_data["Session"]["SteamID"]
-
-    if not password:
-        print(f"[{steam_id}] ❌ Пароль для аккаунта '{username}' не найден в .env. Пропуск авторизации.")
-        return None
-
-    client = None  # Инициализируем client как None
-    print(f"[{steam_id}] Попытка авторизации aiosteampy для аккаунта '{username}'...")
-    try:
-        client = SteamClient(
-            steam_id=steam_id,
-            username=username,
-            password=password,
-            shared_secret=shared_secret
-        )
-        await client.login()
-        print(f"[{steam_id}] ✅ aiosteampy авторизация успешна.")
-        return client
-    except KeyError as e:
-        print(
-            f"[{steam_id}] ❌ Ошибка aiosteampy авторизации: {e}. Возможно, аккаунт временно заблокирован или требуется повторная попытка. Пропускаю этот аккаунт.")
-        if client:
-            await client.session.close()
-        return None
-    except Exception as e:
-        print(
-            f"[{steam_id}] ❌ Общая ошибка aiosteampy авторизации: {e}. Убедитесь, что пароль в .env верен и maFile актуален. Пропускаю этот аккаунт.")
-        if client:
-            await client.session.close()
-        return None
-
 def normalize_steam_url(url: str) -> str:
+    """Гарантирует наличие https:// в ссылке."""
     url = url.strip()
-    if not url.startswith(("http://", "https://")):
-        url = "https://" + url
-    return url
-
-async def _setup_playwright_page(cookies: dict, initial_url: str, steamid: str) -> tuple[Page, Browser, BrowserContext]:
-    """
-    Настраивает Playwright, создает контекст, внедряет куки и переходит на начальный URL.
-    Возвращает объект страницы, браузера и контекста.
-    """
-    initial_url = normalize_steam_url(initial_url)
-    p = await async_playwright().start()
-    browser = await p.chromium.launch(headless=False)
-    context = await browser.new_context()
-
-    playwright_cookies = []
-    for morsel in cookies.values():
-        cookie_dict = {
-            "name": morsel.key,
-            "value": morsel.value,
-            "httpOnly": "httponly" in morsel,
-            "secure": "secure" in morsel,
-        }
-        same_site_value = morsel.get("samesite")
-        if same_site_value:
-            same_site_value = same_site_value.capitalize()
-            if same_site_value not in ["Strict", "Lax", "None"]:
-                same_site_value = "Lax"
-        else:
-            same_site_value = "Lax"
-        cookie_dict["sameSite"] = same_site_value
-
-        morsel_domain = morsel.get("domain")
-        morsel_path = morsel.get("path")
-
-        if morsel_domain and morsel_domain.startswith('.'):
-            effective_domain = morsel_domain.lstrip('.')
-            cookie_dict["url"] = f"https://{effective_domain}{morsel_path if morsel_path else '/'}"
-        elif morsel_domain and morsel_path:
-            cookie_dict["domain"] = morsel_domain
-            cookie_dict["path"] = morsel_path
-        else:
-            cookie_dict["domain"] = URL(initial_url).host
-            cookie_dict["path"] = "/"
-        playwright_cookies.append(cookie_dict)
-    await context.add_cookies(playwright_cookies)
-
-    page = await context.new_page()
-    print(f"[{steamid}] Playwright: Перехожу на страницу: {initial_url}...")
-    await page.goto(initial_url, wait_until="load", timeout=60000)
-    return page, browser, context
-
-
-async def _attempt_to_close_any_modal(page: Page, steamid: str):
-    """Попытка закрыть любое открытое модальное окно или оверлей."""
-    print(f"[{steamid}] Playwright: Попытка закрыть любое открытое модальное окно.")
-    try:
-        close_button_selectors = [
-            'button._3Ju8vy_foEPg9ILmy2-htb._1hcJa9ylImmFKuHsfilos.Focusable:has-text("Позже")',
-            'button._3Ju8vy_foEPg9ILmy2-htb._1hcJa9ylImmFKuHsfilos.Focusable:has-text("Later")',
-            'button[aria-label="Close"]',
-            'div[class*="ModalPosition_TopBar"] button',
-            'button:has-text("Отмена")',
-            'button:has-text("Cancel")'
-        ]
-
-        for selector in close_button_selectors:
-            close_button = await page.query_selector(selector)
-            if close_button and await close_button.is_visible():
-                print(f"[{steamid}] Playwright: Найдена кнопка закрытия/отмены по селектору '{selector}'. Кликаю.")
-                await close_button.click()
-                await asyncio.sleep(0.2)
-                return True
-        print(f"[{steamid}] Playwright: Кнопка закрытия/отмены не найдена.")
-        return False
-    except Exception as e:
-        print(f"[{steamid}] Playwright: Ошибка при попытке закрыть модальное окно: {e}")
-        return False
-
+    return url if url.startswith("http") else f"https://{url}"
 
 async def _parse_multipart_field(multipart_string: str, field_name: str) -> str | None:
     """
@@ -173,11 +56,45 @@ async def _parse_multipart_field(multipart_string: str, field_name: str) -> str 
     return None
 
 
+def _prepare_playwright_cookies(cookies: dict, initial_url: str) -> list[dict]:
+    """Конвертация morsel-куков в формат Playwright."""
+    prepared = []
+    host = URL(initial_url).host
+    for morsel in cookies.values():
+        c = {
+            "name": morsel.key, "value": morsel.value,
+            "httpOnly": "httponly" in morsel, "secure": "secure" in morsel,
+            "sameSite": (morsel.get("samesite") or "Lax").capitalize()
+        }
+        if c["sameSite"] not in ["Strict", "Lax", "None"]: c["sameSite"] = "Lax"
+
+        domain = morsel.get("domain")
+        if domain:
+            c["domain"] = domain
+            c["path"] = morsel.get("path") or "/"
+        else:
+            c["domain"] = host
+            c["path"] = "/"
+        prepared.append(c)
+    return prepared
+
+async def _setup_playwright_page(cookies: dict, url: str, steamid: str) -> tuple[Page, Browser, BrowserContext]:
+    """Инициализация браузера с внедрением куков."""
+    url = normalize_steam_url(url)
+    p = await async_playwright().start()
+    browser = await p.chromium.launch(headless=False)
+    context = await browser.new_context()
+
+    await context.add_cookies(_prepare_playwright_cookies(cookies, url))
+    page = await context.new_page()
+
+    print(f"[{steamid}] Playwright: Перехожу на страницу: {url}...")
+    await page.goto(url, wait_until="load", timeout=60000)
+    return page, browser, context
+
+
 async def _handle_age_verification(page: Page, steamid: str) -> bool:
-    """
-    Обрабатывает страницу проверки возраста, если она появляется.
-    Возвращает True, если проверка возраста была пройдена и страница перенаправлена, False иначе.
-    """
+    """Устанавливает возраст на странице проверки возраста, если она появляется."""
     if "/agecheck/app/" in page.url:
         print(f"[{steamid}] Playwright: Обнаружена страница проверки возраста. Устанавливаю дату рождения.")
         try:
@@ -200,16 +117,115 @@ async def _handle_age_verification(page: Page, steamid: str) -> bool:
             return False
     return False
 
-
 async def _check_if_game_owned(page: Page, steamid: str):
-    """
-    Проверяет, куплена ли игра.
-    """
+    """Проверяет наличие игры."""
     owned_div = await page.query_selector("div.game_area_already_owned")
     if owned_div:
         print(f"[{steamid}] ℹ️ Игра уже есть в библиотеке. Пропускаю.")
         return True
     return False
+
+
+async def _click_element(page: Page, selector: str, steamid: str, label: str) -> bool:
+    """Универсальный клик по элементу."""
+    try:
+        btn = await page.query_selector(selector)
+        if btn and await btn.is_visible():
+            print(f"[{steamid}] ✅ Найдена {label}. Выполняю клик.")
+            await btn.click()
+            await asyncio.sleep(0.2)
+            return True
+        return False
+    except Exception as e:
+        print(f"[{steamid}] ❌ Ошибка при клике на {label}: {e}")
+        return False
+
+async def _wait_and_click(page: Page, selector: str, steamid: str, label: str, timeout: int = 2000) -> bool:
+    """Ожидание элемента и последующий клик."""
+    try:
+        btn = await page.wait_for_selector(selector, timeout=timeout)
+        if btn:
+            print(f"[{steamid}] ✅ {label} появилась. Кликаю.")
+            await btn.click()
+            await asyncio.sleep(0.2)
+            return True
+    except PlaywrightTimeoutError:
+        print(f"[{steamid}] ⚠️ {label} не появилась за {timeout}мс.")
+    except Exception as e:
+        print(f"[{steamid}] ❌ Ошибка ожидания {label}: {e}")
+    return False
+
+async def _attempt_to_close_any_modal(page: Page, steamid: str):
+    """Попытка закрыть любое открытое модальное окно или оверлей."""
+    close_selectors = [
+        'button._3Ju8vy_foEPg9ILmy2-htb._1hcJa9ylImmFKuHsfilos.Focusable:has-text("Позже")',
+        'button._3Ju8vy_foEPg9ILmy2-htb._1hcJa9ylImmFKuHsfilos.Focusable:has-text("Later")',
+        'button[aria-label="Close"]',
+        'div[class*="ModalPosition_TopBar"] button',
+        'button:has-text("Отмена")',
+        'button:has-text("Cancel")'
+    ]
+
+    for selector in close_selectors:
+        if await _click_element(page, selector, steamid, f"кнопка закрытия ({selector[:20]}...)"):
+            return True
+    print(f"[{steamid}] Playwright: Кнопка закрытия/отмены не найдена.")
+    return False
+
+async def _handle_success_modal(page: Page, steamid: str) -> bool:
+    """Ищет и закрывает модальное окно после успешного добавления игры."""
+    modal_selector = 'div.newmodal_content_border'
+    ok_button_selector = 'div.newmodal_buttons span:has-text("OK"), div.newmodal_buttons span:has-text("ОК")'
+    try:
+        if await page.wait_for_selector(modal_selector, timeout=2000):
+            print(f"[{steamid}] ✅ Найдено модальное окно успеха. Пытаюсь закрыть его...")
+            return await _wait_and_click(page, ok_button_selector, steamid, "кнопка OK")
+    except:
+        print(f"[{steamid}] Playwright: Модальное окно успеха не появилось в ожидаемое время.")
+    return False
+
+async def _check_and_click_add_button(page: Page, steamid: str) -> str | None:
+    """
+    Проверяет наличие и кликает на кнопку 'Добавить на аккаунт' или 'Add to Account'.
+    Возвращает 'modal' если появляется модальное окно, 'redirect' если происходит переадресация,
+    или None если кнопка не найдена.
+    """
+    # 1. Поиск кнопки "Добавить на аккаунт" / "Add to Account" (с href)
+    add_to_account_selectors = (
+        'div.game_area_purchase_game:not(.demo_above_purchase) '
+        'a.btn_green_steamui:has(span:has-text("Добавить на аккаунт")), '
+        'div.game_area_purchase_game:not(.demo_above_purchase) '
+        'a.btn_green_steamui:has(span:has-text("Add to Account"))'
+    )
+    for s in add_to_account_selectors:
+        if await _click_element(page, s, steamid, "кнопка добавления на аккаунт (редирект)"):
+            return 'redirect'
+
+    # 2. Поиск кнопки "Добавить в библиотеку" / "Add to Library" (с onclick)
+    add_to_library_selectors = (
+        'div.game_area_purchase_game:not(.demo_above_purchase) '
+        'span.btn_blue_steamui:has(span:has-text("Добавить в библиотеку")), '
+        'div.game_area_purchase_game:not(.demo_above_purchase) '
+        'span.btn_blue_steamui:has(span:has-text("Add to Library"))'
+    )
+    for s in add_to_library_selectors:
+        if await _click_element(page, s, steamid, "кнопка добавления в библиотеку (модалка)"):
+            return 'modal'
+
+    # 3. Поиск кнопки "Установить игру" / "Install Game" / "Загрузить" / "Download"
+    install_game_selectors = (
+        'a.btn_green_steamui.btn_medium[href^="javascript:addToCart"]:has(span:has-text("Установить игру")), '
+        'a.btn_green_steamui.btn_medium[href^="javascript:addToCart"]:has(span:has-text("Install Game")), '
+        'a.btn_green_steamui.btn_medium[href^="javascript:addToCart"]:has(span:has-text("Загрузить")), '
+        'a.btn_green_steamui.btn_medium[href^="javascript:addToCart"]:has(span:has-text("Download"))'
+    )
+
+    for s in install_game_selectors:
+        if await _click_element(page, s, steamid, "кнопка загрузки (редирект)"):
+            return 'redirect'
+
+    print(f"[{steamid}] Кнопка для добавления не найдена.")
+    return None
 
 
 async def collect_points_items(session: aiohttp.ClientSession, steamid: str, cookies: dict, shop_url: str,
@@ -438,91 +454,6 @@ async def collect_points_items(session: aiohttp.ClientSession, steamid: str, coo
                 print(f"[{steamid}] Ошибка при попытке купить предмет: {e}")
     return newly_collected_protobufs
 
-
-async def _handle_success_modal(page: Page, steamid: str) -> bool:
-    """
-    Ищет и закрывает модальное окно после успешного добавления игры.
-    """
-    try:
-        modal_selector = 'div.newmodal_content_border'
-        modal = await page.wait_for_selector(modal_selector, timeout=2000)
-
-        if modal:
-            print(f"[{steamid}] ✅ Найдено модальное окно успеха. Пытаюсь закрыть его...")
-            ok_button_selector = 'div.newmodal_buttons span:has-text("OK"), div.newmodal_buttons span:has-text("ОК")'
-            ok_button = await page.wait_for_selector(ok_button_selector, timeout=2000)
-
-            if ok_button:
-                await ok_button.click()
-                print(f"[{steamid}] ✅ Модальное окно успешно закрыто.")
-                return True
-        return False
-    except PlaywrightTimeoutError:
-        print(f"[{steamid}] Playwright: Модальное окно успеха не появилось в ожидаемое время.")
-        return False
-    except Exception as e:
-        print(f"[{steamid}] Playwright: Ошибка при обработке модального окна: {e}")
-        return False
-
-
-async def _check_and_click_add_button(page: Page, steamid: str) -> str | None:
-    """
-    Проверяет наличие и кликает на кнопку 'Добавить на аккаунт' или 'Add to Account'.
-    Возвращает 'modal' если появляется модальное окно, 'redirect' если происходит переадресация,
-    или None если кнопка не найдена.
-    """
-    # 1. Поиск кнопки "Добавить на аккаунт" / "Add to Account" (с href)
-    add_to_account_selector = (
-        'div.game_area_purchase_game:not(.demo_above_purchase) '
-        'a.btn_green_steamui:has(span:has-text("Добавить на аккаунт")), '
-        'div.game_area_purchase_game:not(.demo_above_purchase) '
-        'a.btn_green_steamui:has(span:has-text("Add to Account"))'
-    )
-    add_to_account_button = await page.query_selector(add_to_account_selector)
-
-    if add_to_account_button and await add_to_account_button.is_visible():
-        print(f"[{steamid}] ✅ Найдена кнопка 'Добавить на аккаунт'. Выполняю клик.")
-        await add_to_account_button.click()
-        await asyncio.sleep(0.2)
-        print(f"[{steamid}] ✅ Кнопка была успешно нажата. Ожидаю переадресацию на страницу подтверждения.")
-        return 'redirect'
-
-    # 2. Поиск кнопки "Добавить в библиотеку" / "Add to Library" (с onclick)
-    add_to_library_selector = (
-        'div.game_area_purchase_game:not(.demo_above_purchase) '
-        'span.btn_blue_steamui:has(span:has-text("Добавить в библиотеку")), '
-        'div.game_area_purchase_game:not(.demo_above_purchase) '
-        'span.btn_blue_steamui:has(span:has-text("Add to Library"))'
-    )
-    add_to_library_button = await page.query_selector(add_to_library_selector)
-
-    if add_to_library_button and await add_to_library_button.is_visible():
-        print(f"[{steamid}] ✅ Найдена кнопка 'Добавить в библиотеку'. Выполняю клик.")
-        await add_to_library_button.click()
-        await asyncio.sleep(0.2)
-        print(f"[{steamid}] ✅ Кнопка была успешно нажата. Ожидаю модальное окно.")
-        return 'modal'
-
-    # 3. Поиск кнопки "Установить игру" / "Install Game" / "Загрузить" / "Download"
-    install_game_selector = (
-        'a.btn_green_steamui.btn_medium[href^="javascript:addToCart"]:has(span:has-text("Установить игру")), '
-        'a.btn_green_steamui.btn_medium[href^="javascript:addToCart"]:has(span:has-text("Install Game")), '
-        'a.btn_green_steamui.btn_medium[href^="javascript:addToCart"]:has(span:has-text("Загрузить")), '
-        'a.btn_green_steamui.btn_medium[href^="javascript:addToCart"]:has(span:has-text("Download"))'
-    )
-
-    install_game_button = await page.query_selector(install_game_selector)
-    if install_game_button and await install_game_button.is_visible():
-        print(f"[{steamid}] ✅ Найдена кнопка 'Установить игру' / 'Загрузить'. Выполняю клик.")
-        await install_game_button.click()
-        await asyncio.sleep(0.2)
-        print(f"[{steamid}] ✅ Кнопка была успешно нажата. Ожидаю переадресацию на страницу подтверждения.")
-        return 'redirect'
-
-    print(f"[{steamid}] Кнопка для добавления игры в библиотеку не найдена.")
-    return None
-
-
 async def claim_free_game(steamid: str, cookies: dict, url: str):
     """
     Пытается получить бесплатную игру, используя только Playwright для имитации действий пользователя.
@@ -530,7 +461,6 @@ async def claim_free_game(steamid: str, cookies: dict, url: str):
     print(f"[{steamid}] Попытка получить бесплатную игру по ссылке: {url}")
 
     browser = None
-    context = None
     try:
         page, browser, context = await _setup_playwright_page(cookies, url, steamid)
 
@@ -554,6 +484,33 @@ async def claim_free_game(steamid: str, cookies: dict, url: str):
         if browser:
             await browser.close()
 
+
+async def get_steam_client(mafile_data: dict):
+    """Авторизация через aiosteampy для получения сессии и токенов."""
+    username = mafile_data["account_name"]
+    password = os.getenv(f'STEAM_PASS_{username}')
+    shared_secret = mafile_data.get("shared_secret")
+    steam_id = mafile_data["Session"]["SteamID"]
+
+    if not password:
+        print(f"[{steam_id}] ❌ Пароль для аккаунта '{username}' не найден в .env. Пропуск авторизации.")
+        return None
+
+    print(f"[{steam_id}] Попытка авторизации aiosteampy для аккаунта '{username}'...")
+    try:
+        client = SteamClient(
+            steam_id=steam_id,
+            username=username,
+            password=password,
+            shared_secret=shared_secret
+        )
+        await client.login()
+        print(f"[{steam_id}] ✅ aiosteampy авторизация успешна.")
+        return client
+    except Exception as e:
+        print(
+            f"[{steam_id}] ❌ Общая ошибка aiosteampy авторизации: {e}. Убедитесь, что пароль в .env верен и maFile актуален. Пропускаю этот аккаунт.")
+        return None
 
 async def run_for_account(mafile_path: str, urls: list[str], config_data: dict) -> bool:
     """
@@ -606,29 +563,26 @@ async def run_for_account(mafile_path: str, urls: list[str], config_data: dict) 
         if client:
             await client.session.close()
 
-
 async def main():
     """Основная функция для запуска скрипта."""
-    urls_file = "urls.txt"
-    if not os.path.exists(urls_file):
+    if not os.path.exists(URLS_FILE):
         print("Создайте файл urls.txt со ссылками на бесплатные предметы (по одной ссылке на строку).")
         return
 
-    with open(urls_file, "r", encoding="utf-8") as f:
+    with open(URLS_FILE, "r", encoding="utf-8") as f:
         urls = [line.strip() for line in f if line.strip()]
 
     if not urls:
         print("Файл urls.txt пуст. Добавьте хотя бы одну ссылку на магазин очков Steam.")
         return
 
-    mafiles_dir = "./maFiles"
-    if not os.path.exists(mafiles_dir):
-        print(f"Создайте папку '{mafiles_dir}' и поместите туда свои .maFile.")
+    if not os.path.exists(MAFILES_DIR):
+        print(f"Создайте папку '{MAFILES_DIR}' и поместите туда свои .maFile.")
         return
 
-    mafiles = [os.path.join(mafiles_dir, f) for f in os.listdir(mafiles_dir) if f.endswith(".maFile")]
+    mafiles = [os.path.join(MAFILES_DIR, f) for f in os.listdir(MAFILES_DIR) if f.endswith(".maFile")]
     if not mafiles:
-        print(f"В папке '{mafiles_dir}' не найдено .maFile.")
+        print(f"В папке '{MAFILES_DIR}' не найдено .maFile.")
         return
 
     print(f"Найдено {len(mafiles)} аккаунтов и {len(urls)} URL для обработки.")
@@ -656,4 +610,4 @@ async def main():
 
 
 if __name__ == "__main__":
-    asyncio.get_event_loop().run_until_complete(main())
+    asyncio.run(main())
