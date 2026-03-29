@@ -193,7 +193,7 @@ async def _check_and_click_add_button(page: Page, steamid: str) -> str | None:
     # 1. Поиск кнопки "Добавить на аккаунт" / "Add to Account" (с href)
     add_to_account_selectors = (
         'div.game_area_purchase_game:not(.demo_above_purchase) '
-        'a.btn_green_steamui:has(span:has-text("Добавить на аккаунт")), '
+        'a.btn_green_steamui:has(span:has-text("Добавить на аккаунт"))',
         'div.game_area_purchase_game:not(.demo_above_purchase) '
         'a.btn_green_steamui:has(span:has-text("Add to Account"))'
     )
@@ -204,7 +204,7 @@ async def _check_and_click_add_button(page: Page, steamid: str) -> str | None:
     # 2. Поиск кнопки "Добавить в библиотеку" / "Add to Library" (с onclick)
     add_to_library_selectors = (
         'div.game_area_purchase_game:not(.demo_above_purchase) '
-        'span.btn_blue_steamui:has(span:has-text("Добавить в библиотеку")), '
+        'span.btn_blue_steamui:has(span:has-text("Добавить в библиотеку"))',
         'div.game_area_purchase_game:not(.demo_above_purchase) '
         'span.btn_blue_steamui:has(span:has-text("Add to Library"))'
     )
@@ -214,9 +214,9 @@ async def _check_and_click_add_button(page: Page, steamid: str) -> str | None:
 
     # 3. Поиск кнопки "Установить игру" / "Install Game" / "Загрузить" / "Download"
     install_game_selectors = (
-        'a.btn_green_steamui.btn_medium[href^="javascript:addToCart"]:has(span:has-text("Установить игру")), '
-        'a.btn_green_steamui.btn_medium[href^="javascript:addToCart"]:has(span:has-text("Install Game")), '
-        'a.btn_green_steamui.btn_medium[href^="javascript:addToCart"]:has(span:has-text("Загрузить")), '
+        'a.btn_green_steamui.btn_medium[href^="javascript:addToCart"]:has(span:has-text("Установить игру"))',
+        'a.btn_green_steamui.btn_medium[href^="javascript:addToCart"]:has(span:has-text("Install Game"))',
+        'a.btn_green_steamui.btn_medium[href^="javascript:addToCart"]:has(span:has-text("Загрузить"))',
         'a.btn_green_steamui.btn_medium[href^="javascript:addToCart"]:has(span:has-text("Download"))'
     )
 
