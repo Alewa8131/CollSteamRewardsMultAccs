@@ -33,5 +33,6 @@
 
 *.maFile
 *.env
+/sessions
 .idea
 __pycache__

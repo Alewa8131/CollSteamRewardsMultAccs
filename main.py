@@ -19,6 +19,41 @@ load_dotenv()
 CONFIG_FILE_PATH = 'config.py'
 MAFILES_DIR = "./maFiles"
 URLS_FILE = "urls.txt"
+SESSIONS_PATH = "./sessions"
+os.makedirs(SESSIONS_PATH, exist_ok=True)
+
+def save_session_cookies(username: str, cookies_dict: dict):
+    """Сохраняет куки аккаунта в файл."""
+    path = os.path.join(SESSIONS_PATH, f"{username}.json")
+
+    serializable_cookies = {k: v.value for k, v in cookies_dict.items()}
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(serializable_cookies, f)
+
+def load_session_cookies(username: str) -> dict | None:
+    """Загружает куки из файла."""
+    path = os.path.join(SESSIONS_PATH, f"{username}.json")
+    if os.path.exists(path):
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    return None
+
+async def is_session_alive(cookies: dict) -> bool:
+    """Проверяет валидность сессии по реальным данным профиля."""
+    if not cookies: return False
+
+    clean_cookies = {k: (v.value if hasattr(v, 'value') else v) for k, v in cookies.items()}
+
+    async with aiohttp.ClientSession(cookies=clean_cookies) as session:
+        try:
+            async with session.get("https://store.steampowered.com/dynamicstore/userdata/", timeout=10) as resp:
+                if resp.status != 200:
+                    return False
+                data = await resp.json()
+                return len(data.get("rgOwnedApps", [])) > 0
+        except Exception as e:
+            print(f"Ошибка при проверке userdata: {e}")
+            return False
 
 async def update_config_data_in_file(data: dict):
     """Атомарно обновляет CONFIG_DATA в config.py."""
@@ -60,22 +95,18 @@ def _prepare_playwright_cookies(cookies: dict, initial_url: str) -> list[dict]:
     """Конвертация morsel-куков в формат Playwright."""
     prepared = []
     host = URL(initial_url).host
-    for morsel in cookies.values():
-        c = {
-            "name": morsel.key, "value": morsel.value,
-            "httpOnly": "httponly" in morsel, "secure": "secure" in morsel,
-            "sameSite": (morsel.get("samesite") or "Lax").capitalize()
-        }
-        if c["sameSite"] not in ["Strict", "Lax", "None"]: c["sameSite"] = "Lax"
+    for key, val in cookies.items():
+        actual_value = val.value if hasattr(val, 'value') else val
 
-        domain = morsel.get("domain")
-        if domain:
-            c["domain"] = domain
-            c["path"] = morsel.get("path") or "/"
-        else:
-            c["domain"] = host
-            c["path"] = "/"
-        prepared.append(c)
+        prepared.append({
+            "name": key,
+            "value": str(actual_value),
+            "domain": host,
+            "path": "/",
+            "secure": True,
+            "httpOnly": True if key in ['steamLoginSecure', 'sessionid'] else False,
+            "sameSite": "Lax"
+        })
     return prepared
 
 async def _setup_playwright_page(cookies: dict, url: str, steamid: str) -> tuple[Page, Browser, BrowserContext]:
@@ -513,54 +544,68 @@ async def get_steam_client(mafile_data: dict):
         return None
 
 async def run_for_account(mafile_path: str, urls: list[str], config_data: dict) -> bool:
-    """
-    Основная функция для авторизации и обработки URL для одного аккаунта.
-    """
+    """Авторизуется в аккаунт и проходит по ссылкам."""
     mafile_data = await load_mafile(mafile_path)
-    client = await get_steam_client(mafile_data)
-
-    if client is None:
-        return False
-
-    session = client.session
+    username = mafile_data["account_name"]
     steamid = mafile_data["Session"]["SteamID"]
+
+    saved_cookies = load_session_cookies(username)
+    client = None
+    use_saved_session = False
+
+    if saved_cookies:
+        print(f"[{steamid}] 🔎 Найдена сохраненная сессия. Проверяю валидность...")
+        if await is_session_alive(saved_cookies):
+            print(f"[{steamid}] ✅ Сессия валидна. Пропускаю вход по 2FA.")
+            use_saved_session = True
+        else:
+            print(f"[{steamid}] ❌ Сессия истекла.")
+
+    if not use_saved_session:
+        client = await get_steam_client(mafile_data)
+        if client is None:
+            return False
+
+        current_cookies = client.session.cookie_jar.filter_cookies(URL("https://store.steampowered.com"))
+        save_session_cookies(username, current_cookies)
+        session = client.session
+    else:
+        session = aiohttp.ClientSession(cookies=saved_cookies)
 
     access_token = None
     cookies_from_client = session.cookie_jar.filter_cookies(URL("https://store.steampowered.com"))
 
     for cookie_name, morsel in cookies_from_client.items():
         if cookie_name == "steamLoginSecure":
-            match = re.search(r'%7C%7C(.+)', morsel.value)
-            if match:
-                access_token = match.group(1)
-                print(f"[{steamid}] ✅ Получен access_token из steamLoginSecure.")
-                break
-
-    if not access_token:
-        print(f"[{steamid}] ❌ Не удалось получить access_token для аккаунта. Пропуск обработки URL для этого аккаунта.")
-        await session.close()
-        return False
+            val = morsel.value if hasattr(morsel, 'value') else morsel
+            if '%7C%7C' in val:
+                access_token = val.split('%7C%7C')[1]
+            elif '||' in val:
+                access_token = val.split('||')[1]
+            break
 
     try:
+        if not access_token:
+            print(f"[{steamid}] ❌ Не удалось получить access_token.")
+            return False
+
         for url in urls:
             print(f"[{steamid}] Обработка URL: {url}")
             if 'store.steampowered.com/points/shop' in url:
                 await collect_points_items(session, steamid, cookies_from_client, url, access_token, config_data)
             elif '/app/' in url:
-                app_id_match = re.search(r'/app/(\d+)', url)
-                if app_id_match:
-                    await claim_free_game(steamid, cookies_from_client, url)
-                else:
-                    print(f"[{steamid}] ❌ Не удалось извлечь AppID из URL: {url}")
+                await claim_free_game(steamid, cookies_from_client, url)
             else:
                 print(f"[{steamid}] ⚠️ Неподдерживаемый URL: {url}. Пропускаю.")
 
         return True
     except Exception as e:
-        print(f"[{steamid}] Общая ошибка при обработке аккаунта: {e}")
+        print(f"[{steamid}] Ошибка: {e}")
         return False
     finally:
-        if client:
+        if use_saved_session:
+            await session.close()
+        elif client:
             await client.session.close()
 
 async def main():
@@ -610,4 +655,4 @@ async def main():
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    asyncio.get_event_loop().run_until_complete(main())  # Fixed errors appearing after accounts were processed
